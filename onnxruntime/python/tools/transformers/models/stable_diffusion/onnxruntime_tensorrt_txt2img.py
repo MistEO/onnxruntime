@@ -47,8 +47,8 @@ from diffusers.pipelines.stable_diffusion import (
 )
 from diffusers.schedulers import DDIMScheduler
 from diffusers.utils import DIFFUSERS_CACHE, logging
-from huggingface_hub import snapshot_download
 from diffusion_models import CLIP, VAE, PipelineInfo, UNet
+from huggingface_hub import snapshot_download
 from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
 
 import onnxruntime as ort
@@ -289,7 +289,7 @@ class OnnxruntimeTensorRTStableDiffusionPipeline(StableDiffusionPipeline):
         onnx_opset: int = 17,
         onnx_dir: str = "onnx",
         # TensorRT engine build parameters
-        engine_dir: str = "ort_trt", # use short name here to avoid exception that path exceeds 260 chars in Windows.
+        engine_dir: str = "ort_trt",  # use short name here to avoid exception that path exceeds 260 chars in Windows.
         force_engine_rebuild: bool = False,
         enable_cuda_graph: bool = False,
         pipeline_info: PipelineInfo = None,

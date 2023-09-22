@@ -277,13 +277,13 @@ def run_ort_pipeline(
         for j in range(batch_count):
             inference_start = time.time()
             images = pipe(
-                [prompt]*batch_size,
+                [prompt] * batch_size,
                 height,
                 width,
                 num_inference_steps=steps,
                 negative_prompt=[negative_prompt] * batch_size,
                 guidance_scale=7.5,
-                #num_images_per_prompt=batch_size,
+                # num_images_per_prompt=batch_size,
             ).images
             inference_end = time.time()
             latency = inference_end - inference_start
@@ -344,13 +344,13 @@ def run_torch_pipeline(
         for j in range(batch_count):
             inference_start = time.time()
             images = pipe(
-                prompt=[prompt]*batch_size,
+                prompt=[prompt] * batch_size,
                 height=height,
                 width=width,
                 num_inference_steps=steps,
                 guidance_scale=7.5,
-                negative_prompt=[negative_prompt]*batch_size,
-                #num_images_per_prompt=batch_size,
+                negative_prompt=[negative_prompt] * batch_size,
+                # num_images_per_prompt=batch_size,
                 generator=None,  # torch.Generator
             ).images
 
@@ -705,8 +705,9 @@ def run_tensorrt(
         "enable_cuda_graph": False,
     }
 
+
 def run_tensorrt_demo(
-    version:str,
+    version: str,
     model_name: str,
     batch_size: int,
     disable_safety_checker: bool,
@@ -718,20 +719,20 @@ def run_tensorrt_demo(
     start_memory,
     memory_monitor_type,
     max_batch_size: int,
-):    
-    from cuda import cudart
+):
     import tensorrt as trt
-    from trt_demo.utilities import TRT_LOGGER
+    from cuda import cudart
     from trt_demo.txt2img_pipeline import Txt2ImgPipeline
+    from trt_demo.utilities import TRT_LOGGER
 
     # Register TensorRT plugins
-    trt.init_libnvinfer_plugins(TRT_LOGGER, '')
+    trt.init_libnvinfer_plugins(TRT_LOGGER, "")
 
     assert batch_size <= max_batch_size
 
     # Initialize demo
     demo = Txt2ImgPipeline(
-        scheduler="DDIM",
+        scheduler="DDIM",  # Other choices: "PNDM", "LMSD", "DPM", "EulerA"
         denoising_steps=steps,
         output_dir="output_dir",
         version=version,
@@ -739,7 +740,8 @@ def run_tensorrt_demo(
         verbose=False,
         nvtx_profile=False,
         max_batch_size=max_batch_size,
-        use_cuda_graph=True)
+        use_cuda_graph=True,
+    )
 
     # Load TensorRT engines and pytorch modules
     demo.loadEngines(
@@ -759,7 +761,8 @@ def run_tensorrt_demo(
         enable_preview=False,
         enable_all_tactics=False,
         timing_cache="timing_cache",
-        onnx_refit_dir=None)
+        onnx_refit_dir=None,
+    )
 
     max_device_memory = max(demo.calculateMaxDeviceMemory(), demo.calculateMaxDeviceMemory())
     _, shared_device_memory = cudart.cudaMalloc(max_device_memory)
@@ -768,9 +771,8 @@ def run_tensorrt_demo(
     seed = 123
     demo.loadResources(height, width, batch_size, seed)
 
-
     def warmup():
-        images = demo.infer(["warm up"] * batch_size, ["negative"] * batch_size, height, width, warmup=True)
+        demo.infer(["warm up"] * batch_size, ["negative"] * batch_size, height, width, warmup=True)
 
     # Run warm up, and measure GPU memory of two runs
     # The first run has algo search so it might need more memory
@@ -798,7 +800,7 @@ def run_tensorrt_demo(
                 image.save(f"{image_filename_prefix}_{i}_{j}_{k}.jpg")
 
     demo.teardown()
-    
+
     return {
         "engine": "tensorrt_demo",
         "version": trt.__version__,
@@ -815,7 +817,6 @@ def run_tensorrt_demo(
         "second_run_memory_MB": second_run_memory,
         "enable_cuda_graph": True,
     }
-
 
 
 def run_torch(
@@ -1145,7 +1146,7 @@ def main():
             args.batch_count,
             start_memory,
             memory_monitor_type,
-            args.max_trt_batch_size,            
+            args.max_trt_batch_size,
         )
     elif args.engine == "tensorrt":
         result = run_tensorrt(

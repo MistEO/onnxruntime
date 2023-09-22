@@ -15,44 +15,31 @@
 # limitations under the License.
 #
 
-import numpy as np
-import nvtx
 import time
-import torch
+
 import tensorrt as trt
-from utilities import TRT_LOGGER
-from stable_diffusion_pipeline import StableDiffusionPipeline
+import torch
 from PIL import Image
+from stable_diffusion_pipeline import StableDiffusionPipeline
+from utilities import TRT_LOGGER
+
 
 class Txt2ImgPipeline(StableDiffusionPipeline):
     """
     Application showcasing the acceleration of Stable Diffusion Txt2Img pipeline using NVidia TensorRT.
     """
-    def __init__(
-        self,
-        scheduler="DDIM",
-        *args, **kwargs
-    ):
+
+    def __init__(self, scheduler="DDIM", *args, **kwargs):
         """
         Initializes the Txt2Img Diffusion pipeline.
 
         Args:
             scheduler (str):
-                The scheduler to guide the denoising process. Must be one of the [DPM, LMSD, DDIM, EulerA, PNDM].
+                The scheduler to guide the denoising process. Must be one of the [DDIM, EulerA, UniPC].
         """
-        super(Txt2ImgPipeline, self).__init__(*args, **kwargs, \
-            scheduler=scheduler, stages=['clip','unet','vae'])
+        super().__init__(*args, **kwargs, scheduler=scheduler, stages=["clip", "unet", "vae"])
 
-    def infer(
-        self,
-        prompt,
-        negative_prompt,
-        image_height,
-        image_width,
-        seed=None,
-        warmup=False,
-        verbose=False
-    ):
+    def infer(self, prompt, negative_prompt, image_height, image_width, seed=None, warmup=False, verbose=False):
         """
         Run the diffusion pipeline.
 
@@ -76,11 +63,11 @@ class Txt2ImgPipeline(StableDiffusionPipeline):
         batch_size = len(prompt)
         with torch.inference_mode(), torch.autocast("cuda"), trt.Runtime(TRT_LOGGER):
             # Pre-initialize latents
-            latents = self.initialize_latents( \
-                batch_size=batch_size, \
-                unet_channels=4, \
-                latent_height=(image_height // 8), \
-                latent_width=(image_width // 8)
+            latents = self.initialize_latents(
+                batch_size=batch_size,
+                unet_channels=4,
+                latent_height=(image_height // 8),
+                latent_width=(image_width // 8),
             )
 
             torch.cuda.synchronize()
@@ -100,8 +87,17 @@ class Txt2ImgPipeline(StableDiffusionPipeline):
 
             if not warmup:
                 self.print_summary(self.denoising_steps, e2e_tic, e2e_toc, batch_size)
-                self.save_image(images, 'txt2img', prompt)
-            
+                self.save_image(images, "txt2img", prompt)
+
             # The following are added for benchmark purpose (apple-to-apple comparison with diffusers)
-            images = ((images + 1) * 255 / 2).clamp(0, 255).detach().permute(0, 2, 3, 1).round().type(torch.uint8).cpu().numpy()
+            images = (
+                ((images + 1) * 255 / 2)
+                .clamp(0, 255)
+                .detach()
+                .permute(0, 2, 3, 1)
+                .round()
+                .type(torch.uint8)
+                .cpu()
+                .numpy()
+            )
             return [Image.fromarray(image) for image in images]
