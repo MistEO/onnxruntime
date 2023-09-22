@@ -30,7 +30,11 @@ class TypeHelper:
     def ort_type_to_numpy_type(ort_type: str):
         ort_type_to_numpy_type_map = {
             "tensor(int64)": numpy.longlong,
-            "tensor(int32)": numpy.intc,
+            "tensor(int32)": numpy.int32,
+            "tensor(int16)": numpy.int16,
+            "tensor(int8)": numpy.int8,
+            "tensor(uint8)": numpy.uint8,
+            "tensor(double)": numpy.float64,
             "tensor(float)": numpy.float32,
             "tensor(float16)": numpy.float16,
             "tensor(bool)": bool,
@@ -45,6 +49,10 @@ class TypeHelper:
         ort_type_to_torch_type_map = {
             "tensor(int64)": torch.int64,
             "tensor(int32)": torch.int32,
+            "tensor(int16)": torch.int16,
+            "tensor(int8)": torch.int8,
+            "tensor(uint8)": torch.uint8,
+            "tensor(double)": torch.float64,
             "tensor(float)": torch.float32,
             "tensor(float16)": torch.float16,
             "tensor(bool)": torch.bool,
@@ -57,11 +65,15 @@ class TypeHelper:
     @staticmethod
     def numpy_type_to_torch_type(numpy_type: numpy.dtype):
         numpy_type_to_torch_type_map = {
-            numpy.longlong: torch.int64,
-            numpy.intc: torch.int32,
+            numpy.uint8: torch.uint8,
+            numpy.int8: torch.int8,
+            numpy.int16: torch.int16,
             numpy.int32: torch.int32,
-            numpy.float32: torch.float32,
+            numpy.int32: torch.int32,
+            numpy.longlong: torch.int64,
             numpy.float16: torch.float16,
+            numpy.float32: torch.float32,
+            numpy.float64: torch.float64,
             bool: torch.bool,
         }
         if numpy_type not in numpy_type_to_torch_type_map:
@@ -72,10 +84,14 @@ class TypeHelper:
     @staticmethod
     def torch_type_to_numpy_type(torch_type: torch.dtype):
         torch_type_to_numpy_type_map = {
+            torch.uint8: numpy.uint8,
+            torch.int8: numpy.int8,
+            torch.int16: numpy.int16,
+            torch.int32: numpy.int32,
             torch.int64: numpy.longlong,
-            torch.int32: numpy.intc,
-            torch.float32: numpy.float32,
             torch.float16: numpy.float16,
+            torch.float32: numpy.float32,
+            torch.float64: numpy.float64,
             torch.bool: bool,
         }
         if torch_type not in torch_type_to_numpy_type_map:
