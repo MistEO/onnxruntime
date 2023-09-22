@@ -200,7 +200,7 @@ class BaseModel:
         self,
         pipeline_info: PipelineInfo,
         model,
-        device="cuda",
+        device,
         fp16: bool = False,
         max_batch_size: int = 16,
         embedding_dim: int = 768,
@@ -450,7 +450,7 @@ class CLIPWithProj(CLIP):
         self,
         pipeline_info: PipelineInfo,
         model,
-        device="cuda",
+        device,
         max_batch_size=16,
         clip_skip=0,
     ):
@@ -498,7 +498,7 @@ class UNet(BaseModel):
         self,
         pipeline_info: PipelineInfo,
         model,
-        device="cuda",
+        device,
         fp16=False,  # used by TRT
         max_batch_size=16,
         text_maxlen=77,
