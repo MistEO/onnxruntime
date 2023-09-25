@@ -47,17 +47,17 @@ from diffusers.pipelines.stable_diffusion import (
 )
 from diffusers.schedulers import DDIMScheduler
 from diffusers.utils import DIFFUSERS_CACHE, logging
-from diffusion_models import CLIP, VAE, PipelineInfo, UNet
+from diffusion_models import CLIP, VAE, PipelineInfo, UNet, UNetXL, CLIPWithProj
 from huggingface_hub import snapshot_download
 from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
 
 import onnxruntime as ort
-from onnxruntime.transformers.io_binding_helper import CudaSession
+from io_binding_helper import CudaSession
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
-class Engine(CudaSession):
+class TensorrtEngine(CudaSession):
     def __init__(self, engine_path, device_id, onnx_path, fp16, input_profile, workspace_size, enable_cuda_graph):
         self.engine_path = engine_path
         self.ort_trt_provider_options = self.get_tensorrt_provider_options(
@@ -246,7 +246,7 @@ def build_engines(
             static_image_shape=static_image_shape,
         )
 
-        engine = Engine(
+        engine = TensorrtEngine(
             engine_path,
             device_id,
             onnx_opt_path,
@@ -289,10 +289,11 @@ class OnnxruntimeTensorRTStableDiffusionPipeline(StableDiffusionPipeline):
         onnx_opset: int = 17,
         onnx_dir: str = "onnx",
         # TensorRT engine build parameters
-        engine_dir: str = "ort_trt",  # use short name here to avoid exception that path exceeds 260 chars in Windows.
+        engine_dir: str = "ort_trt",  # use short name here to avoid path exceeds 260 chars in Windows.
         force_engine_rebuild: bool = False,
         enable_cuda_graph: bool = False,
-        pipeline_info: PipelineInfo = None,
+        pipeline_info: Optional[PipelineInfo] = None,
+        stages=["clip", "unet", "vae"],
     ):
         super().__init__(
             vae, text_encoder, tokenizer, unet, scheduler, safety_checker, feature_extractor, requires_safety_checker
@@ -325,33 +326,61 @@ class OnnxruntimeTensorRTStableDiffusionPipeline(StableDiffusionPipeline):
         self.engines = {}  # loaded in build_engines()
 
         self.pipeline_info = pipeline_info
+        self.stages = stages
 
     def __load_models(self):
         self.embedding_dim = self.text_encoder.config.hidden_size
 
-        self.models["clip"] = CLIP(
-            self.pipeline_info,
-            self.text_encoder,
-            device=self.torch_device,
-            max_batch_size=self.max_batch_size,
-            clip_skip=0,
-        )
+        if "clip" in self.stages:
+            self.models["clip"] = CLIP(
+                self.pipeline_info,
+                self.text_encoder,
+                device=self.torch_device,
+                max_batch_size=self.max_batch_size,
+                clip_skip=0,
+            )
 
-        self.models["unet"] = UNet(
-            self.pipeline_info,
-            self.unet,
-            device=self.torch_device,
-            fp16=True,
-            max_batch_size=self.max_batch_size,
-            unet_dim=(9 if self.inpaint else 4),
-        )
+        if "clip2" in self.stages:
+            self.models["clip2"] = CLIPWithProj(
+                self.pipeline_info,
+                self.text_encoder,
+                device=self.torch_device,
+                max_batch_size=self.max_batch_size,
+                clip_skip=0,
+            )
 
-        self.models["vae"] = VAE(
-            self.pipeline_info,
-            self.vae,
-            device=self.torch_device,
-            max_batch_size=self.max_batch_size,
-        )
+        if "unet" in self.stages:
+            self.models["unet"] = UNet(
+                self.pipeline_info,
+                self.unet,
+                device=self.torch_device,
+                fp16=True,
+                max_batch_size=self.max_batch_size,
+                unet_dim=(9 if self.inpaint else 4),
+                # controlnet=get_controlnets_path(self.controlnet),
+            )
+
+        if "unetxl" in self.stages:
+            self.models["unetxl"] = UNetXL(
+                self.pipeline_info,
+                self.unet,
+                device=self.torch_device,
+                fp16=True,
+                max_batch_size=self.max_batch_size,
+                unet_dim=4,
+                time_dim=(5 if pipeline_info.is_sd_xl_refiner() else 6),
+            )
+
+        # VAE Decoder
+        if "vae" in self.stages:
+            self.models["vae"] = VAE(
+                self.pipeline_info,
+                self.vae,
+                device=self.torch_device,
+                max_batch_size=self.max_batch_size,
+            )
+            # if self.config.get("vae_torch_fallback", False):
+            #     self.torch_models["vae"] = self.models["vae"].get_model(framework_model_dir)
 
     @classmethod
     def set_cached_folder(cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs):

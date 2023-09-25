@@ -19,6 +19,7 @@ SD_MODELS = {
     "1.5": "runwayml/stable-diffusion-v1-5",
     "2.0": "stabilityai/stable-diffusion-2",
     "2.1": "stabilityai/stable-diffusion-2-1",
+    "xl-1.0": "stabilityai/stable-diffusion-xl-refiner-1.0",
 }
 
 PROVIDERS = {
@@ -564,7 +565,7 @@ def run_ort_trt(
     pipe = pipe.to("cuda")
 
     def warmup():
-        pipe(["warm up"] * batch_size, num_inference_steps=steps)
+        pipe(["warm up"] * batch_size, negative_prompt=["negative"] * batch_size, num_inference_steps=steps)
 
     # Run warm up, and measure GPU memory of two runs
     # The first run has algo search so it might need more memory
@@ -719,10 +720,12 @@ def run_tensorrt_demo(
     start_memory,
     memory_monitor_type,
     max_batch_size: int,
+    use_original_script:bool=True,
+    nvtx_profile:bool=False,
+    use_cuda_graph:bool=True,
 ):
     import tensorrt as trt
     from cuda import cudart
-    from trt_demo.txt2img_pipeline import Txt2ImgPipeline
     from trt_demo.utilities import TRT_LOGGER
 
     # Register TensorRT plugins
@@ -730,24 +733,51 @@ def run_tensorrt_demo(
 
     assert batch_size <= max_batch_size
 
-    # Initialize demo
-    demo = Txt2ImgPipeline(
-        scheduler="DDIM",  # Other choices: "PNDM", "LMSD", "DPM", "EulerA"
-        denoising_steps=steps,
-        output_dir="output_dir",
-        version=version,
-        hf_token=None,
-        verbose=False,
-        nvtx_profile=False,
-        max_batch_size=max_batch_size,
-        use_cuda_graph=True,
-    )
+    from diffusion_models import PipelineInfo
+    pipeline_info = PipelineInfo(version)
+    short_name = pipeline_info.short_name()
+    onnx_dir= os.path.join("_workspace", short_name, "onnx")
+    engine_dir=os.path.join("_workspace", short_name, "trt_engine")
+    output_dir=os.path.join("_workspace", short_name, "output")
+    framework_model_dir=os.path.join("_workspace", "torch_model")
+    timing_cache=os.path.join("_workspace", "timing_cache")
+
+    if use_original_script:
+        from trt_demo.txt2img_pipeline import Txt2ImgPipeline
+        demo = Txt2ImgPipeline(
+            scheduler="DDIM",  # Other choices: "PNDM", "LMSD", "DPM", "EulerA"
+            denoising_steps=steps,
+            output_dir=output_dir,
+            version=version,
+            hf_token=None,
+            verbose=False,
+            nvtx_profile=nvtx_profile,
+            max_batch_size=max_batch_size,
+            use_cuda_graph=use_cuda_graph,
+        )
+    else:
+        from tensorrt_txt2img_pipeline import TensorrtTxt2ImgPipeline
+
+        #model_name = pipeline_info.name()
+
+        # Initialize demo
+        demo = TensorrtTxt2ImgPipeline(
+            pipeline_info,
+            scheduler="DDIM",
+            denoising_steps=steps,
+            output_dir=output_dir,
+            hf_token=None,
+            verbose=False,
+            nvtx_profile=nvtx_profile,
+            max_batch_size=max_batch_size,
+            use_cuda_graph=True,
+        )
 
     # Load TensorRT engines and pytorch modules
     demo.loadEngines(
-        "engine_dir",
-        "framework_model_dir",
-        "onnx_dir",
+        engine_dir,
+        framework_model_dir,
+        onnx_dir,
         14,
         opt_batch_size=batch_size,
         opt_image_height=height,
@@ -760,7 +790,7 @@ def run_tensorrt_demo(
         enable_refit=False,
         enable_preview=False,
         enable_all_tactics=False,
-        timing_cache="timing_cache",
+        timing_cache=timing_cache,
         onnx_refit_dir=None,
     )
 
@@ -815,9 +845,164 @@ def run_tensorrt_demo(
         "median_latency": statistics.median(latency_list),
         "first_run_memory_MB": first_run_memory,
         "second_run_memory_MB": second_run_memory,
-        "enable_cuda_graph": True,
+        "enable_cuda_graph": use_cuda_graph,
     }
 
+
+def run_tensorrt_xl(
+    version: str,
+    batch_size: int,
+    disable_safety_checker: bool,
+    height: int,
+    width: int,
+    steps: int,
+    num_prompts: int,
+    batch_count: int,
+    start_memory,
+    memory_monitor_type,
+    max_batch_size: int,
+    nvtx_profile:bool=False,
+    use_cuda_graph=True,
+):
+    print("[I] Initializing TensorRT accelerated StableDiffusionXL txt2img pipeline")
+
+    import tensorrt as trt
+    from tensorrt_txt2img_xl_pipeline import TensorrtTxt2ImgXLPipeline
+    from tensorrt_img2img_xl_pipeline import TensorrtImg2ImgXLPipeline
+    from diffusion_models import PipelineInfo
+    from trt_demo.utilities import TRT_LOGGER
+
+    # Validate image dimensions
+    image_height = height
+    image_width = width
+    if image_height % 8 != 0 or image_width % 8 != 0:
+        raise ValueError(f"Image height and width have to be divisible by 8 but specified as: {image_height} and {image_width}.")
+
+    # Register TensorRT plugins
+    trt.init_libnvinfer_plugins(TRT_LOGGER, '')
+
+    assert batch_size <= max_batch_size
+
+    def init_pipeline(pipeline_class,
+                      pipeline_info):
+
+        short_name = pipeline_info.short_name()
+        onnx_dir= os.path.join("_workspace", short_name, "onnx")
+        engine_dir=os.path.join("_workspace", short_name, "trt_engine")
+        output_dir=os.path.join("_workspace", short_name, "output")
+        framework_model_dir=os.path.join("_workspace", "torch_model")
+        timing_cache=os.path.join("_workspace", "timing_cache")
+
+        # Initialize demo
+        demo = pipeline_class(
+            pipeline_info,
+            scheduler="DDIM",
+            denoising_steps=steps,
+            output_dir=output_dir,
+            hf_token=None,
+            verbose=False,
+            nvtx_profile=nvtx_profile,
+            max_batch_size=max_batch_size,
+            use_cuda_graph=use_cuda_graph,
+            framework_model_dir=framework_model_dir,
+            )
+
+        demo.loadEngines(
+            engine_dir,
+            framework_model_dir,
+            onnx_dir,
+            14,
+            opt_batch_size=batch_size,
+            opt_image_height=height,
+            opt_image_width=width,
+            force_export=False,
+            force_optimize=False,
+            force_build=False,
+            static_batch=True,
+            static_shape=True,
+            enable_refit=False,
+            enable_preview=False,
+            enable_all_tactics=False,
+            timing_cache=timing_cache,
+            onnx_refit_dir=None)
+        return demo
+
+
+    base_pipeline_info = PipelineInfo(version)
+    demo_base = init_pipeline(TensorrtTxt2ImgXLPipeline, base_pipeline_info)
+
+    refiner_pipeline_info = PipelineInfo(version, is_sd_xl_refiner=True)
+    demo_refiner = init_pipeline(TensorrtImg2ImgXLPipeline, refiner_pipeline_info)
+    max_device_memory = max(demo_base.calculateMaxDeviceMemory(), demo_refiner.calculateMaxDeviceMemory())
+    _, shared_device_memory = cudart.cudaMalloc(max_device_memory)
+    demo_base.activateEngines(shared_device_memory)
+    demo_refiner.activateEngines(shared_device_memory)
+    seed = 123
+    demo_base.loadResources(image_height, image_width, batch_size, seed)
+    demo_refiner.loadResources(image_height, image_width, batch_size, seed)
+
+    def run_sd_xl_inference(prompt, negative_prompt, warmup=False, verbose=False):
+        images, time_base = demo_base.infer(prompt, negative_prompt, image_height, image_width, warmup=warmup, verbose=verbose, seed=seed, return_type="latents")
+        images, time_refiner = demo_refiner.infer(prompt, negative_prompt, images, image_height, image_width, warmup=warmup, verbose=verbose, seed=seed)
+        return images, time_base + time_refiner
+
+    def warmup():
+        run_sd_xl_inference(["warm up"] * batch_size, ["negative"] * batch_size, warmup=True)
+
+    # Run warm up, and measure GPU memory of two runs
+    # The first run has algo search so it might need more memory
+    first_run_memory = measure_gpu_memory(memory_monitor_type, warmup, start_memory)
+    second_run_memory = measure_gpu_memory(memory_monitor_type, warmup, start_memory)
+
+    warmup()
+
+    model_name = refiner_pipeline_info.name()
+    image_filename_prefix = get_image_filename_prefix("trt_demo", model_name, batch_size, disable_safety_checker)
+
+    latency_list = []
+    prompts, negative_prompt = example_prompts()
+    for i, prompt in enumerate(prompts):
+        if i >= num_prompts:
+            break
+        for j in range(batch_count):
+            inference_start = time.time()
+            # Use warmup mode here since non-warmup mode will save image to disk.
+            if nvtx_profile:
+                cudart.cudaProfilerStart()
+            images, pipeline_time = run_sd_xl_inference([prompt] * batch_size, [negative_prompt] * batch_size, warmup=True)
+            if nvtx_profile:
+                cudart.cudaProfilerStop()
+            inference_end = time.time()
+
+            print('|------------|--------------|')
+            print('| {:^10} | {:>9.2f} ms |'.format('e2e', pipeline_time))
+            print('|------------|--------------|')
+
+            latency = inference_end - inference_start
+            latency_list.append(latency)
+            print(f"Inference took {latency:.3f} seconds")
+            for k, image in enumerate(images):
+                image.save(f"{image_filename_prefix}_{i}_{j}_{k}.jpg")
+
+    demo_base.teardown()
+    demo_refiner.teardown()
+
+    return {
+        "engine": "tensorrt_demo",
+        "version": trt.__version__,
+        "provider": "default",
+        "height": height,
+        "width": width,
+        "steps": steps,
+        "batch_size": batch_size,
+        "batch_count": batch_count,
+        "num_prompts": num_prompts,
+        "average_latency": sum(latency_list) / len(latency_list),
+        "median_latency": statistics.median(latency_list),
+        "first_run_memory_MB": first_run_memory,
+        "second_run_memory_MB": second_run_memory,
+        "enable_cuda_graph": use_cuda_graph,
+    }
 
 def run_torch(
     model_name: str,
@@ -1134,20 +1319,37 @@ def main():
             args.tuning,
         )
     elif args.engine == "tensorrt_demo":
-        result = run_tensorrt_demo(
-            args.version,
-            sd_model,
-            args.batch_size,
-            True,
-            args.height,
-            args.width,
-            args.steps,
-            args.num_prompts,
-            args.batch_count,
-            start_memory,
-            memory_monitor_type,
-            args.max_trt_batch_size,
-        )
+        if "xl" not in args.version:
+            result = run_tensorrt_demo(
+                args.version,
+                sd_model,
+                args.batch_size,
+                True,
+                args.height,
+                args.width,
+                args.steps,
+                args.num_prompts,
+                args.batch_count,
+                start_memory,
+                memory_monitor_type,
+                args.max_trt_batch_size,
+            )
+        else:
+            result = run_tensorrt_xl(
+                args.version,
+                args.batch_size,
+                True,
+                args.height,
+                args.width,
+                args.steps,
+                args.num_prompts,
+                args.batch_count,
+                start_memory,
+                memory_monitor_type,
+                args.max_trt_batch_size,
+                nvtx_profile=False,
+                use_cuda_graph=args.enable_cuda_graph
+            )
     elif args.engine == "tensorrt":
         result = run_tensorrt(
             sd_model,
@@ -1210,8 +1412,9 @@ def main():
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        tb = sys.exc_info()
-        print(e.with_traceback(tb[2]))
+    # try:
+    #     main()
+    # except Exception as e:
+    #     tb = sys.exc_info()
+    #     print(e.with_traceback(tb[2]))
+    main()

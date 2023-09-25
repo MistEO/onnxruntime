@@ -295,6 +295,9 @@ class CudaSession:
 
     def infer(self, feed_dict: Dict[str, torch.Tensor]):
         """Bind input tensors and run inference"""
+        if not self.enable_cuda_graph:
+            self.io_binding.clear_binding_inputs()
+
         for name, tensor in feed_dict.items():
             assert isinstance(tensor, torch.Tensor) and tensor.is_contiguous()
             if name in self.input_names:
