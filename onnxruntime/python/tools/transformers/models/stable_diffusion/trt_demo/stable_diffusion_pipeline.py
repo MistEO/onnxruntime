@@ -687,3 +687,4 @@ class StableDiffusionPipeline:
             + "-"
         )
         save_image(images, self.output_dir, image_name_prefix)
+        

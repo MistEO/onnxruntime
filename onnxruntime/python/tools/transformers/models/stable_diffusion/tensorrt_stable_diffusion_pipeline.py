@@ -21,10 +21,9 @@ import pathlib
 
 import numpy as np
 import nvtx
-import onnx
 import torch
 from cuda import cudart
-from diffusion_models import CLIP, CLIPWithProj, UNet, UNetXL, VAE, VAEEncoder, PipelineInfo, get_tokenizer
+from diffusion_models import CLIP, VAE, CLIPWithProj, PipelineInfo, UNet, UNetXL, get_tokenizer
 from trt_demo.utilities import (
     DDIMScheduler,
     Engine,
@@ -33,6 +32,7 @@ from trt_demo.utilities import (
     save_image,
 )
 
+
 class TensorrtStableDiffusionPipeline:
     """
     Stable Diffusion pipeline using NVidia TensorRT.
@@ -40,7 +40,7 @@ class TensorrtStableDiffusionPipeline:
 
     def __init__(
         self,
-        pipeline_info : PipelineInfo,
+        pipeline_info: PipelineInfo,
         stages=["clip", "unet", "vae"],
         max_batch_size=16,
         denoising_steps=50,
@@ -136,11 +136,9 @@ class TensorrtStableDiffusionPipeline:
             raise ValueError("Scheduler should be either DDIM, EulerA or UniPC")
 
         self.stages = stages
-        self.config = {}
-        if self.pipeline_info.is_sd_xl():
-            # FIXME - SDXL
-            self.config["vae_torch_fallback"] = True
-            self.config["clip_hidden_states"] = True
+
+        self.vae_torch_fallback = self.pipeline_info.is_sd_xl()
+
         self.use_cuda_graph = use_cuda_graph
 
         # initialized in loadResources()
@@ -169,7 +167,7 @@ class TensorrtStableDiffusionPipeline:
 
         # Allocate buffers for TensorRT engine bindings
         for model_name, obj in self.models.items():
-            if model_name == "vae" and self.config.get("vae_torch_fallback", False):
+            if model_name == "vae" and self.vae_torch_fallback:
                 continue
             self.engine[model_name].allocate_buffers(
                 shape_dict=obj.get_shape_dict(batch_size, image_height, image_width), device=self.device
@@ -270,12 +268,14 @@ class TensorrtStableDiffusionPipeline:
         # Load text tokenizer
         # FIXME - SDXL
         if not self.pipeline_info.is_sd_xl_refiner():
-            self.tokenizer = get_tokenizer(self.pipeline_info, framework_model_dir, self.hf_token, subfolder="tokenizer")
+            self.tokenizer = get_tokenizer(
+                self.pipeline_info, framework_model_dir, self.hf_token, subfolder="tokenizer"
+            )
 
         if "clip" in self.stages:
             self.models["clip"] = CLIP(
                 self.pipeline_info,
-                None, # not loaded yet
+                None,  # not loaded yet
                 device=self.torch_device,
                 max_batch_size=self.max_batch_size,
                 clip_skip=0,
@@ -284,7 +284,7 @@ class TensorrtStableDiffusionPipeline:
         if "clip2" in self.stages:
             self.models["clip2"] = CLIPWithProj(
                 self.pipeline_info,
-                None, # not loaded yet
+                None,  # not loaded yet
                 device=self.torch_device,
                 max_batch_size=self.max_batch_size,
                 clip_skip=0,
@@ -293,7 +293,7 @@ class TensorrtStableDiffusionPipeline:
         if "unet" in self.stages:
             self.models["unet"] = UNet(
                 self.pipeline_info,
-                None, # not loaded yet
+                None,  # not loaded yet
                 device=self.torch_device,
                 fp16=True,
                 max_batch_size=self.max_batch_size,
@@ -304,7 +304,7 @@ class TensorrtStableDiffusionPipeline:
         if "unetxl" in self.stages:
             self.models["unetxl"] = UNetXL(
                 self.pipeline_info,
-                None, # not loaded yet
+                None,  # not loaded yet
                 device=self.torch_device,
                 fp16=True,
                 max_batch_size=self.max_batch_size,
@@ -316,17 +316,17 @@ class TensorrtStableDiffusionPipeline:
         if "vae" in self.stages:
             self.models["vae"] = VAE(
                 self.pipeline_info,
-                None, # not loaded yet
+                None,  # not loaded yet
                 device=self.torch_device,
                 max_batch_size=self.max_batch_size,
             )
 
-            if self.config.get("vae_torch_fallback", False):
+            if self.vae_torch_fallback:
                 self.torch_models["vae"] = self.models["vae"].load_model(framework_model_dir, self.hf_token)
 
         # Export models to ONNX
         for model_name, obj in self.models.items():
-            if model_name == "vae" and self.config.get("vae_torch_fallback", False):
+            if model_name == "vae" and self.vae_torch_fallback:
                 continue
             engine_path = self.getEnginePath(model_name, engine_dir)
             if force_export or force_build or not os.path.exists(engine_path):
@@ -358,13 +358,13 @@ class TensorrtStableDiffusionPipeline:
                     # Optimize onnx
                     if force_optimize or not os.path.exists(onnx_opt_path):
                         print(f"Generating optimizing model: {onnx_opt_path}")
-                        onnx_opt_graph = obj.optimize_trt(onnx_path, onnx_opt_path)
+                        obj.optimize_trt(onnx_path, onnx_opt_path)
                     else:
                         print(f"Found cached optimized model: {onnx_opt_path} ")
 
         # Build TensorRT engines
         for model_name, obj in self.models.items():
-            if model_name == "vae" and self.config.get("vae_torch_fallback", False):
+            if model_name == "vae" and self.vae_torch_fallback:
                 continue
             engine_path = self.getEnginePath(model_name, engine_dir)
             engine = Engine(engine_path)
@@ -392,7 +392,7 @@ class TensorrtStableDiffusionPipeline:
 
         # Load TensorRT engines
         for model_name, obj in self.models.items():
-            if model_name == "vae" and self.config.get("vae_torch_fallback", False):
+            if model_name == "vae" and self.vae_torch_fallback:
                 continue
             self.engine[model_name].load()
             if onnx_refit_dir:
@@ -440,8 +440,8 @@ class TensorrtStableDiffusionPipeline:
         if self.nvtx_profile:
             nvtx_image_preprocess = nvtx.start_range(message="image_preprocess", color="pink")
         init_images = []
-        for image in images:
-            image = image.to(self.device).float()
+        for i in images:
+            image = i.to(self.device).float()
             if image.shape[0] != batch_size:
                 image = image.repeat(batch_size, 1, 1, 1)
             init_images.append(image)
@@ -633,7 +633,7 @@ class TensorrtStableDiffusionPipeline:
         if self.nvtx_profile:
             nvtx_vae = nvtx.start_range(message="vae", color="red")
         cudart.cudaEventRecord(self.events["vae-start"], 0)
-        if self.config.get("vae_torch_fallback", False):
+        if self.vae_torch_fallback:
             latents = latents.to(dtype=torch.float32)
             self.torch_models["vae"] = self.torch_models["vae"].to(dtype=torch.float32)
             images = self.torch_models["vae"](latents)["sample"]
@@ -694,3 +694,10 @@ class TensorrtStableDiffusionPipeline:
             + "-"
         )
         save_image(images, self.output_dir, image_name_prefix)
+
+
+def to_pil_image(images):
+    images = ((images + 1) * 255 / 2).clamp(0, 255).detach().permute(0, 2, 3, 1).round().type(torch.uint8).cpu().numpy()
+    from PIL import Image
+
+    return [Image.fromarray(image) for image in images]

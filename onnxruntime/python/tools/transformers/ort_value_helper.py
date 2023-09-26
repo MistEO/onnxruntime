@@ -1,18 +1,19 @@
 import logging
 from collections import OrderedDict
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy
 import torch
+from io_binding_helper import TypeHelper
 from torch._C import _from_dlpack
-from torch.utils.dlpack import to_dlpack
 from torch._subclasses.fake_tensor import FakeTensor
+from torch.utils.dlpack import to_dlpack
 
 from onnxruntime import InferenceSession, RunOptions
 from onnxruntime.capi import _pybind_state as ORTC
-from io_binding_helper import TypeHelper
 
 logger = logging.getLogger(__name__)
+
 
 def get_ort_device_type(device_type: str):
     if device_type == "cuda":
@@ -20,6 +21,7 @@ def get_ort_device_type(device_type: str):
     if device_type == "cpu":
         return ORTC.OrtDevice.cpu()
     raise ValueError("Unsupported device type: " + device_type)
+
 
 def get_ort_devices(values: Tuple[torch.Tensor, ...]) -> Tuple[ORTC.OrtDevice, ...]:  # type: ignore
     assert all(value.device == values[0].device for value in values), "All values must be on the same device."
@@ -37,6 +39,7 @@ def get_ort_devices(values: Tuple[torch.Tensor, ...]) -> Tuple[ORTC.OrtDevice, .
     )
     return devices
 
+
 def get_ortvalues_from_torch_tensors(
     tensors: Tuple[torch.Tensor, ...], devices: Tuple[ORTC.OrtDevice, ...]
 ) -> Tuple[torch.Tensor, ...]:
@@ -52,6 +55,7 @@ def get_ortvalues_from_torch_tensors(
         data_ptrs.append(tensor.data_ptr())
     ortvalues.push_back_batch(tensors, data_ptrs, dtypes, shapes, devices)
     return ortvalues
+
 
 def to_real_tensor(tensor: FakeTensor) -> torch.Tensor:
     if tensor.is_sparse:
@@ -106,7 +110,6 @@ def run_session_with_ortvaluevector(
     output_devices: Tuple[ORTC.OrtDevice, ...],  # type: ignore
     preallocate_output: bool,
 ) -> Tuple[torch.Tensor, ...]:
-
     inputs = tuple(a.contiguous() for a in inputs)
 
     ort_inputs = get_ortvalues_from_torch_tensors(inputs, input_devices)
@@ -129,11 +132,3 @@ def run_session_with_ortvaluevector(
     else:
         pth_outputs = ortvalues_to_torch_tensor(ort_outputs)  # type: ignore
         return pth_outputs
-
-
-
-
-
-
-
-

@@ -32,7 +32,7 @@ import onnx
 import onnx_graphsurgeon as gs
 import torch
 from diffusers.models import AutoencoderKL, UNet2DConditionModel  # ControlNetModel,
-from onnx import shape_inference
+from onnx import GraphProto, shape_inference
 from ort_optimizer import OrtStableDiffusionOptimizer
 from polygraphy.backend.onnx.loader import fold_constants
 from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
@@ -79,30 +79,6 @@ class TrtOptimizer:
             onnx_graph = shape_inference.infer_shapes(onnx_graph)
 
         self.graph = gs.import_onnx(onnx_graph)
-
-    def clip_add_hidden_states(self, clip_skip: int = 0):
-        hidden_layers = -1
-        onnx_graph = gs.export_onnx(self.graph)
-        for i in range(len(onnx_graph.graph.node)):
-            for j in range(len(onnx_graph.graph.node[i].output)):
-                name = onnx_graph.graph.node[i].output[j]
-                if "layers" in name:
-                    hidden_layers = max(int(name.split(".")[1].split("/")[0]), hidden_layers)
-
-        assert clip_skip >= 0 and clip_skip < hidden_layers
-
-        for i in range(len(onnx_graph.graph.node)):
-            for j in range(len(onnx_graph.graph.node[i].output)):
-                if onnx_graph.graph.node[i].output[j] == "/text_model/encoder/layers.{}/Add_1_output_0".format(
-                    hidden_layers - 1 - clip_skip
-                ):
-                    onnx_graph.graph.node[i].output[j] = "hidden_states"
-            for j in range(len(onnx_graph.graph.node[i].input)):
-                if onnx_graph.graph.node[i].input[j] == "/text_model/encoder/layers.{}/Add_1_output_0".format(
-                    hidden_layers - 1 - clip_skip
-                ):
-                    onnx_graph.graph.node[i].input[j] = "hidden_states"
-        return onnx_graph
 
 
 class PipelineInfo:
@@ -167,7 +143,7 @@ class PipelineInfo:
         raise ValueError(f"Incorrect version {self.version}")
 
     def short_name(self) -> str:
-        return self.name().split('/')[-1].replace('stable-diffusion', 'sd')
+        return self.name().split("/")[-1].replace("stable-diffusion", "sd")
 
     def clip_embedding_dim(self):
         # TODO: can we read from config instead
@@ -332,7 +308,6 @@ class BaseModel:
         else:
             onnx.save(onnx_opt_graph, optimized_onnx_path)
 
-
     def check_dims(self, batch_size, image_height, image_width):
         assert batch_size >= self.min_batch and batch_size <= self.max_batch
         assert image_height % 8 == 0 or image_width % 8 == 0
@@ -376,7 +351,7 @@ class CLIP(BaseModel):
         model,
         device,
         max_batch_size,
-        embedding_dim:int=0,
+        embedding_dim: int = 0,
         clip_skip=0,
     ):
         super().__init__(
@@ -396,6 +371,7 @@ class CLIP(BaseModel):
         return ["input_ids"]
 
     def get_output_names(self):
+        # We will add hidden_state to optimize onnx model, and the exported onnx model has no hidden_state.
         return ["text_embeddings"]
 
     def get_dynamic_axes(self):
@@ -426,6 +402,40 @@ class CLIP(BaseModel):
         self.check_dims(batch_size, image_height, image_width)
         return (torch.zeros(batch_size, self.text_maxlen, dtype=torch.int32, device=self.device),)
 
+    def add_hidden_states_to_graph(self, graph: GraphProto):
+        hidden_layers = -1
+        for i in range(len(graph.node)):
+            for j in range(len(graph.node[i].output)):
+                name = graph.node[i].output[j]
+                if "layers" in name:
+                    hidden_layers = max(int(name.split(".")[1].split("/")[0]), hidden_layers)
+
+        assert self.clip_skip >= 0 and self.clip_skip < hidden_layers
+
+        added = False
+        for i in range(len(graph.node)):
+            for j in range(len(graph.node[i].output)):
+                if graph.node[i].output[j] == "/text_model/encoder/layers.{}/Add_1_output_0".format(
+                    hidden_layers - 1 - self.clip_skip
+                ):
+                    graph.node[i].output[j] = "hidden_states"
+                    added = True
+            for j in range(len(graph.node[i].input)):
+                if graph.node[i].input[j] == "/text_model/encoder/layers.{}/Add_1_output_0".format(
+                    hidden_layers - 1 - self.clip_skip
+                ):
+                    graph.node[i].input[j] = "hidden_states"
+
+        if not added:
+            raise RuntimeError("Failed to add hidden_states graph output in clip")
+
+        hidden_state = graph.output.add()
+        hidden_state.CopyFrom(
+            onnx.helper.make_tensor_value_info(
+                "hidden_states", graph.output[0].type.tensor_type.elem_type, ["B", self.text_maxlen, self.embedding_dim]
+            )
+        )
+
     def optimize_trt(self, input_onnx_path, optimized_onnx_path):
         onnx_graph = onnx.load(input_onnx_path)
         opt = TrtOptimizer(onnx_graph)
@@ -437,8 +447,7 @@ class CLIP(BaseModel):
         opt.cleanup()
         onnx_opt_graph = opt.get_optimized_onnx_graph()
         if self.output_hidden_state:
-            onnx_opt_graph = opt.clip_add_hidden_states(self.clip_skip)
-        onnx_opt_graph = opt.get_optimized_onnx_graph()
+            self.add_hidden_states_to_graph(onnx_opt_graph.graph)
         onnx.save(onnx_opt_graph, optimized_onnx_path)
 
     # TODO: move this out since we pass the model object in constructor.
@@ -500,7 +509,7 @@ class CLIPWithProj(CLIP):
         self.check_dims(batch_size, image_height, image_width)
         output = {
             "input_ids": (batch_size, self.text_maxlen),
-            "text_embeddings": (batch_size, self.text_maxlen, self.embedding_dim),
+            "text_embeddings": (batch_size, self.embedding_dim),
         }
 
         if self.output_hidden_state:
@@ -738,7 +747,7 @@ class VAE(BaseModel):
             max_batch_size=max_batch_size,
         )
 
-    def load_model(self, framework_model_dir, hf_token:Optional[str]=None, subfolder:str="vae_decoder"):
+    def load_model(self, framework_model_dir, hf_token: Optional[str] = None, subfolder: str = "vae_decoder"):
         # vae = self.from_pretrained(AutoencoderKL, framework_model_dir, hf_token, subfolder)
         # vae.forward = vae.decode
         # return vae
@@ -834,7 +843,6 @@ def get_tokenizer(pipeline_info: PipelineInfo, framework_model_dir, hf_token, su
     return model
 
 
-
 class TorchVAEEncoder(torch.nn.Module):
     def __init__(self, vae_encoder):
         super().__init__()
@@ -865,7 +873,6 @@ class VAEEncoder(BaseModel):
 
     def get_dynamic_axes(self):
         return {"images": {0: "B", 2: "8H", 3: "8W"}, "latent": {0: "B", 2: "H", 3: "W"}}
-
 
     def get_input_profile(self, batch_size, image_height, image_width, static_batch, static_image_shape):
         latent_height, latent_width = self.check_dims(batch_size, image_height, image_width)

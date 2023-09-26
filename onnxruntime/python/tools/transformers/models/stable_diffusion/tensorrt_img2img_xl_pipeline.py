@@ -15,26 +15,21 @@
 # limitations under the License.
 #
 
-import numpy as np
-import nvtx
 import time
-import torch
-import contextlib
-import tensorrt as trt
 
+import tensorrt as trt
+import torch
 from diffusion_models import PipelineInfo, get_tokenizer
 from tensorrt_stable_diffusion_pipeline import TensorrtStableDiffusionPipeline
 from trt_demo.utilities import TRT_LOGGER
+
 
 class TensorrtImg2ImgXLPipeline(TensorrtStableDiffusionPipeline):
     """
     Stable Diffusion Img2Img XL pipeline using NVidia TensorRT.
     """
-    def __init__(
-        self,
-        pipeline_info : PipelineInfo,
-        **kwargs
-    ):
+
+    def __init__(self, pipeline_info: PipelineInfo, **kwargs):
         """
         Initializes the Img2Img XL Diffusion pipeline.
 
@@ -44,14 +39,18 @@ class TensorrtImg2ImgXLPipeline(TensorrtStableDiffusionPipeline):
         """
         assert pipeline_info.is_sd_xl_refiner()
 
-        super().__init__(pipeline_info, stages=['clip2', 'unetxl', 'vae'], vae_scaling_factor=0.13025, **kwargs)
+        super().__init__(pipeline_info, stages=["clip2", "unetxl", "vae"], vae_scaling_factor=0.13025, **kwargs)
 
-        self.tokenizer2 = get_tokenizer(self.pipeline_info, self.framework_model_dir, self.hf_token, subfolder="tokenizer_2")
+        self.tokenizer2 = get_tokenizer(
+            self.pipeline_info, self.framework_model_dir, self.hf_token, subfolder="tokenizer_2"
+        )
 
         self.requires_aesthetics_score = True
         self.refiner = True
 
-    def _get_add_time_ids(self, original_size, crops_coords_top_left, target_size, aesthetic_score, negative_aesthetic_score, dtype):
+    def _get_add_time_ids(
+        self, original_size, crops_coords_top_left, target_size, aesthetic_score, negative_aesthetic_score, dtype
+    ):
         if self.requires_aesthetics_score:
             add_time_ids = list(original_size + crops_coords_top_left + (aesthetic_score,))
             add_neg_time_ids = list(original_size + crops_coords_top_left + (negative_aesthetic_score,))
@@ -74,7 +73,7 @@ class TensorrtImg2ImgXLPipeline(TensorrtStableDiffusionPipeline):
         strength=0.3,
         warmup=False,
         verbose=False,
-        return_type="image"
+        return_type="image",
     ):
         """
         Run the diffusion pipeline.
@@ -115,18 +114,28 @@ class TensorrtImg2ImgXLPipeline(TensorrtStableDiffusionPipeline):
             latent_timestep = timesteps[:1].repeat(batch_size)
 
             # CLIP text encoder 2
-            text_embeddings, pooled_embeddings2 = self.encode_prompt(prompt, negative_prompt,
-                                                                      encoder='clip2', tokenizer=self.tokenizer2,
-                                                                      pooled_outputs=True, output_hidden_states=True)
+            text_embeddings, pooled_embeddings2 = self.encode_prompt(
+                prompt,
+                negative_prompt,
+                encoder="clip2",
+                tokenizer=self.tokenizer2,
+                pooled_outputs=True,
+                output_hidden_states=True,
+            )
 
             # Time embeddings
             add_time_ids = self._get_add_time_ids(
-                original_size, crops_coords_top_left, target_size, aesthetic_score, negative_aesthetic_score, dtype=text_embeddings.dtype
+                original_size,
+                crops_coords_top_left,
+                target_size,
+                aesthetic_score,
+                negative_aesthetic_score,
+                dtype=text_embeddings.dtype,
             )
 
             add_time_ids = add_time_ids.repeat(batch_size, 1)
 
-            add_kwargs = {'text_embeds': pooled_embeddings2, 'time_ids': add_time_ids}
+            add_kwargs = {"text_embeds": pooled_embeddings2, "time_ids": add_time_ids}
 
             # Pre-process input image
             init_image = self.preprocess_images(batch_size, (init_image,))[0]
@@ -142,13 +151,15 @@ class TensorrtImg2ImgXLPipeline(TensorrtStableDiffusionPipeline):
             latents = self.scheduler.add_noise(init_latents, noise, t_start, latent_timestep)
 
             # UNet denoiser
-            latents = self.denoise_latent(latents,
+            latents = self.denoise_latent(
+                latents,
                 text_embeddings,
                 timesteps=timesteps,
                 step_offset=t_start,
-                denoiser='unetxl',
+                denoiser="unetxl",
                 guidance=guidance,
-                add_kwargs=add_kwargs)
+                add_kwargs=add_kwargs,
+            )
 
         # FIXME - SDXL/VAE torch fallback
         with torch.inference_mode():
@@ -164,6 +175,6 @@ class TensorrtImg2ImgXLPipeline(TensorrtStableDiffusionPipeline):
             if not warmup:
                 print("SD-XL Refiner Pipeline")
                 self.print_summary(self.denoising_steps, e2e_tic, e2e_toc, batch_size)
-                self.save_image(images, 'txt2img-xl', prompt)
+                self.save_image(images, "txt2img-xl", prompt)
 
-        return images, (e2e_toc - e2e_tic)*1000.
+        return images, (e2e_toc - e2e_tic) * 1000.0

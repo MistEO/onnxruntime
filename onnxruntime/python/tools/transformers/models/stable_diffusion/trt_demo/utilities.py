@@ -304,8 +304,12 @@ class Engine:
                 )
                 self.context.execute_async_v3(stream)
                 self.graph = CUASSERT(cudart.cudaStreamEndCapture(stream))
-                buf = b""
-                self.cuda_graph_instance = CUASSERT(cudart.cudaGraphInstantiate(self.graph, buf, 0))
+                
+                # For CUDA 11.8:
+                # buf = bytes()
+                # self.cuda_graph_instance = CUASSERT(cudart.cudaGraphInstantiate(self.graph, buf, 0))
+                
+                self.cuda_graph_instance = CUASSERT(cudart.cudaGraphInstantiate(self.graph, 0))
         else:
             noerror = self.context.execute_async_v3(stream)
             if not noerror:

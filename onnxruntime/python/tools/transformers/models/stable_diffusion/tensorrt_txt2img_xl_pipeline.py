@@ -29,7 +29,7 @@ class TensorrtTxt2ImgXLPipeline(TensorrtStableDiffusionPipeline):
     Stable Diffusion Txt2Img XL pipeline using NVidia TensorRT.
     """
 
-    def __init__(self, pipeline_info : PipelineInfo, **kwargs):
+    def __init__(self, pipeline_info: PipelineInfo, **kwargs):
         """
         Initializes the Txt2Img XL Diffusion pipeline.
 
@@ -46,7 +46,9 @@ class TensorrtTxt2ImgXLPipeline(TensorrtStableDiffusionPipeline):
             vae_scaling_factor=0.13025,
         )
 
-        self.tokenizer2 = get_tokenizer(self.pipeline_info, self.framework_model_dir, self.hf_token, subfolder="tokenizer_2")
+        self.tokenizer2 = get_tokenizer(
+            self.pipeline_info, self.framework_model_dir, self.hf_token, subfolder="tokenizer_2"
+        )
 
         self.refiner = False
 

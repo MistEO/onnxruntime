@@ -19,8 +19,8 @@ import time
 
 import tensorrt as trt
 import torch
-from PIL import Image
 from diffusion_models import PipelineInfo
+from PIL import Image
 from tensorrt_stable_diffusion_pipeline import TensorrtStableDiffusionPipeline
 from trt_demo.utilities import TRT_LOGGER
 
@@ -30,7 +30,7 @@ class TensorrtTxt2ImgPipeline(TensorrtStableDiffusionPipeline):
     Stable Diffusion Txt2Img pipeline using NVidia TensorRT.
     """
 
-    def __init__(self, pipeline_info : PipelineInfo, **kwargs):
+    def __init__(self, pipeline_info: PipelineInfo, **kwargs):
         """
         Initializes the Txt2Img Diffusion pipeline.
 
@@ -90,15 +90,4 @@ class TensorrtTxt2ImgPipeline(TensorrtStableDiffusionPipeline):
                 self.print_summary(self.denoising_steps, e2e_tic, e2e_toc, batch_size)
                 self.save_image(images, "txt2img", prompt)
 
-            # The following are added for benchmark purpose (apple-to-apple comparison with diffusers)
-            images = (
-                ((images + 1) * 255 / 2)
-                .clamp(0, 255)
-                .detach()
-                .permute(0, 2, 3, 1)
-                .round()
-                .type(torch.uint8)
-                .cpu()
-                .numpy()
-            )
-            return [Image.fromarray(image) for image in images]
+            return images

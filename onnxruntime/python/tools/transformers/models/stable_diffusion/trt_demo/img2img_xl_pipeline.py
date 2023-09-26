@@ -116,8 +116,8 @@ class Img2ImgXLPipeline(StableDiffusionPipeline):
             latent_timestep = timesteps[:1].repeat(batch_size)
 
             # CLIP text encoder 2
-            text_embeddings, pooled_embeddings2 = self.encode_prompt(prompt, negative_prompt, 
-                                                                      encoder='clip2', tokenizer=self.tokenizer2, 
+            text_embeddings, pooled_embeddings2 = self.encode_prompt(prompt, negative_prompt,
+                                                                      encoder='clip2', tokenizer=self.tokenizer2,
                                                                       pooled_outputs=True, output_hidden_states=True)
 
             # Time embeddings

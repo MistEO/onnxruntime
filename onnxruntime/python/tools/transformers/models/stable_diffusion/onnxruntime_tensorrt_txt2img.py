@@ -47,12 +47,12 @@ from diffusers.pipelines.stable_diffusion import (
 )
 from diffusers.schedulers import DDIMScheduler
 from diffusers.utils import DIFFUSERS_CACHE, logging
-from diffusion_models import CLIP, VAE, PipelineInfo, UNet, UNetXL, CLIPWithProj
+from diffusion_models import CLIP, VAE, CLIPWithProj, PipelineInfo, UNet, UNetXL
 from huggingface_hub import snapshot_download
+from io_binding_helper import CudaSession
 from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
 
 import onnxruntime as ort
-from io_binding_helper import CudaSession
 
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
