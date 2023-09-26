@@ -950,11 +950,11 @@ def run_tensorrt_xl(
 
         def init_pipeline(pipeline_class, pipeline_info):
             short_name = pipeline_info.short_name()
-            onnx_dir = os.path.join("_workspace", short_name, "onnx")
-            engine_dir = os.path.join("_workspace", short_name, f"trt_engine_{batch_size}_{height}_{width}")
-            output_dir = os.path.join("_workspace", short_name, "output")
-            framework_model_dir = os.path.join("_workspace", "torch_model")
-            timing_cache = os.path.join("_workspace", "timing_cache")
+            onnx_dir = os.path.join("_trt", short_name, "onnx")
+            engine_dir = os.path.join("_trt", short_name, f"engine_{batch_size}_{height}_{width}")
+            output_dir = os.path.join("_trt", short_name, "output")
+            framework_model_dir = os.path.join("_trt", "torch_model")
+            timing_cache = os.path.join("_trt", "timing_cache")
 
             # Initialize demo
             demo = pipeline_class(

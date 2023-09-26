@@ -218,7 +218,6 @@ class BaseModel:
     def get_model(self):
         return self.model
 
-    # TODO: move this out since we pass the model object in constructor.
     def from_pretrained(self, model_class, framework_model_dir, hf_token, subfolder, **kwargs):
         model_dir = os.path.join(framework_model_dir, self.pipeline_info.version, self.pipeline_info.name(), subfolder)
 
@@ -371,7 +370,7 @@ class CLIP(BaseModel):
         return ["input_ids"]
 
     def get_output_names(self):
-        # We will add hidden_state to optimize onnx model, and the exported onnx model has no hidden_state.
+        # The exported onnx model has no hidden_state. For SD-XL, We will add hidden_state to optimized onnx model.
         return ["text_embeddings"]
 
     def get_dynamic_axes(self):
@@ -450,24 +449,8 @@ class CLIP(BaseModel):
             self.add_hidden_states_to_graph(onnx_opt_graph.graph)
         onnx.save(onnx_opt_graph, optimized_onnx_path)
 
-    # TODO: move this out since we pass the model object in constructor.
     def load_model(self, framework_model_dir, hf_token, subfolder="text_encoder"):
         return self.from_pretrained(CLIPTextModel, framework_model_dir, hf_token, subfolder)
-
-        # clip_model_dir = self.get_model_dir(framework_model_dir, subfolder)
-
-        # if not os.path.exists(clip_model_dir):
-        #     model = CLIPTextModel.from_pretrained(
-        #         self.pipeline_info.name(),
-        #         subfolder=subfolder,
-        #         use_safetensors=self.pipeline_info.use_safetensors(),
-        #         use_auth_token=hf_token,
-        #     ).to(self.device)
-        #     model.save_pretrained(clip_model_dir)
-        # else:
-        #     print(f"Load CLIP pytorch model from: {clip_model_dir}")
-        #     model = CLIPTextModel.from_pretrained(clip_model_dir).to(self.device)
-        # return model
 
 
 class CLIPWithProj(CLIP):
@@ -490,20 +473,6 @@ class CLIPWithProj(CLIP):
 
     def load_model(self, framework_model_dir, hf_token, subfolder="text_encoder_2"):
         return self.from_pretrained(CLIPTextModelWithProjection, framework_model_dir, hf_token, subfolder)
-        # clip_model_dir = self.get_model_dir(framework_model_dir, subfolder)
-
-        # if not os.path.exists(clip_model_dir):
-        #     model = CLIPTextModelWithProjection.from_pretrained(
-        #         self.pipeline_info.name(),
-        #         subfolder=subfolder,
-        #         use_safetensors=self.pipeline_info.use_safetensors(),
-        #         use_auth_token=hf_token,
-        #     ).to(self.device)
-        #     model.save_pretrained(clip_model_dir)
-        # else:
-        #     print(f"Load CLIP pytorch model from: {clip_model_dir}")
-        #     model = CLIPTextModelWithProjection.from_pretrained(clip_model_dir).to(self.device)
-        # return model
 
     def get_shape_dict(self, batch_size, image_height, image_width):
         self.check_dims(batch_size, image_height, image_width)
@@ -543,20 +512,6 @@ class UNet(BaseModel):
     def load_model(self, framework_model_dir, hf_token, subfolder="unet"):
         options = {"variant": "fp16", "torch_dtype": torch.float16} if self.fp16 else {}
         return self.from_pretrained(UNet2DConditionModel, framework_model_dir, hf_token, subfolder, **options)
-        # unet_model_dir = self.get_model_dir(framework_model_dir, subfolder)
-        # if not os.path.exists(unet_model_dir):
-        #     model = UNet2DConditionModel.from_pretrained(
-        #         self.pipeline_info.name(),
-        #         subfolder=subfolder,
-        #         use_safetensors=self.pipeline_info.use_safetensors(),
-        #         use_auth_token=hf_token,
-        #         **model_opts,
-        #     ).to(self.device)
-        #     model.save_pretrained(unet_model_dir)
-        # else:
-        #     print(f"Load UNet pytorch model from: {unet_model_dir}")
-        #     model = UNet2DConditionModel.from_pretrained(unet_model_dir).to(self.device)
-        # return model
 
     def get_input_names(self):
         return ["sample", "timestep", "encoder_hidden_states"]
@@ -646,20 +601,6 @@ class UNetXL(BaseModel):
     def load_model(self, framework_model_dir, hf_token, subfolder="unet"):
         options = {"variant": "fp16", "torch_dtype": torch.float16} if self.fp16 else {}
         return self.from_pretrained(UNet2DConditionModel, framework_model_dir, hf_token, subfolder, **options)
-        # unet_model_dir = self.get_model_dir(framework_model_dir, subfolder)
-        # if not os.path.exists(unet_model_dir):
-        #     model = UNet2DConditionModel.from_pretrained(
-        #         self.pipeline_info.name(),
-        #         subfolder=subfolder,
-        #         use_safetensors=self.pipeline_info.use_safetensors(),
-        #         use_auth_token=hf_token,
-        #         **model_opts,
-        #     ).to(self.device)
-        #     model.save_pretrained(unet_model_dir)
-        # else:
-        #     print(f"Load UNet pytorch model from: {unet_model_dir}")
-        #     model = UNet2DConditionModel.from_pretrained(unet_model_dir).to(self.device)
-        # return model
 
     def get_input_names(self):
         return ["sample", "timestep", "encoder_hidden_states", "text_embeds", "time_ids"]
@@ -748,10 +689,6 @@ class VAE(BaseModel):
         )
 
     def load_model(self, framework_model_dir, hf_token: Optional[str] = None, subfolder: str = "vae_decoder"):
-        # vae = self.from_pretrained(AutoencoderKL, framework_model_dir, hf_token, subfolder)
-        # vae.forward = vae.decode
-        # return vae
-
         model_dir = os.path.join(framework_model_dir, self.pipeline_info.version, self.pipeline_info.name(), subfolder)
         if not os.path.exists(model_dir):
             vae = AutoencoderKL.from_pretrained(
@@ -767,21 +704,6 @@ class VAE(BaseModel):
 
         vae.forward = vae.decode
         return vae
-
-        # vae_decoder_model_path = self.get_model_dir(framework_model_dir, subfolder)
-        # if not os.path.exists(vae_decoder_model_path):
-        #     vae = AutoencoderKL.from_pretrained(
-        #         self.pipeline_info.name(),
-        #         subfolder=subfolder,
-        #         use_safetensors=self.pipeline_info.use_safetensors(),
-        #         use_auth_token=hf_token,
-        #     ).to(self.device)
-        #     vae.save_pretrained(vae_decoder_model_path)
-        # else:
-        #     print(f"Load VAE decoder pytorch model from: {vae_decoder_model_path}")
-        #     vae = AutoencoderKL.from_pretrained(vae_decoder_model_path).to(self.device)
-        # vae.forward = vae.decode
-        # return vae
 
     def get_input_names(self):
         return ["latent"]
