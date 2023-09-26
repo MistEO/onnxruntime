@@ -14,6 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+# -------------------------------------------------------------------------
+# Modifications: use pipeline info.
+#
+# Copyright (c) Microsoft Corporation.  All rights reserved.
+# Licensed under the MIT License.
+# --------------------------------------------------------------------------
 
 import time
 
@@ -39,14 +45,9 @@ class TensorrtImg2ImgXLPipeline(TensorrtStableDiffusionPipeline):
         """
         assert pipeline_info.is_sd_xl_refiner()
 
-        super().__init__(pipeline_info, stages=["clip2", "unetxl", "vae"], vae_scaling_factor=0.13025, **kwargs)
-
-        self.tokenizer2 = get_tokenizer(
-            self.pipeline_info, self.framework_model_dir, self.hf_token, subfolder="tokenizer_2"
-        )
+        super().__init__(pipeline_info, **kwargs)
 
         self.requires_aesthetics_score = True
-        self.refiner = True
 
     def _get_add_time_ids(
         self, original_size, crops_coords_top_left, target_size, aesthetic_score, negative_aesthetic_score, dtype

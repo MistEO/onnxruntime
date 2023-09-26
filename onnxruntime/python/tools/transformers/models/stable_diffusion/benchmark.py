@@ -720,7 +720,7 @@ def run_tensorrt_demo(
     start_memory,
     memory_monitor_type,
     max_batch_size: int,
-    use_original_script: bool = True,
+    use_original_script: bool = False,
     nvtx_profile: bool = False,
     use_cuda_graph: bool = True,
 ):
@@ -738,14 +738,15 @@ def run_tensorrt_demo(
 
     pipeline_info = PipelineInfo(version)
     short_name = pipeline_info.short_name()
-    onnx_dir = os.path.join("_workspace", short_name, "onnx")
-    engine_dir = os.path.join("_workspace", short_name, "trt_engine")
-    output_dir = os.path.join("_workspace", short_name, "output")
-    framework_model_dir = os.path.join("_workspace", "torch_model")
-    timing_cache = os.path.join("_workspace", "timing_cache")
-
+    
     if use_original_script:
         from trt_demo.txt2img_pipeline import Txt2ImgPipeline
+
+        onnx_dir = os.path.join("_original", short_name, "onnx")
+        engine_dir = os.path.join("_original", short_name, "trt_engine")
+        output_dir = os.path.join("_original", short_name, "output")
+        framework_model_dir = os.path.join("_original", "torch_model")
+        timing_cache = os.path.join("_original", "timing_cache")
 
         demo = Txt2ImgPipeline(
             scheduler="DDIM",  # Other choices: "PNDM", "LMSD", "DPM", "EulerA"
@@ -758,9 +759,39 @@ def run_tensorrt_demo(
             max_batch_size=max_batch_size,
             use_cuda_graph=use_cuda_graph,
         )
+        demo.loadEngines(
+            engine_dir,
+            framework_model_dir,
+            onnx_dir,
+            14,
+            opt_batch_size=batch_size,
+            opt_image_height=height,
+            opt_image_width=width,
+            force_export=False,
+            force_optimize=False,
+            force_build=False,
+            static_batch=True,
+            static_shape=True,
+            enable_refit=False,
+            enable_preview=False,
+            enable_all_tactics=False,
+            timing_cache=timing_cache,
+            onnx_refit_dir=None,
+        )
+        
+        max_device_memory = max(demo.calculateMaxDeviceMemory(), demo.calculateMaxDeviceMemory())
+        _, shared_device_memory = cudart.cudaMalloc(max_device_memory)
+        demo.activateEngines(shared_device_memory)
+        
     else:
         from tensorrt_txt2img_pipeline import TensorrtTxt2ImgPipeline
 
+        onnx_dir = os.path.join("_workspace", short_name, "onnx")
+        engine_dir = os.path.join("_workspace", short_name, "trt_engine")
+        output_dir = os.path.join("_workspace", short_name, "output")
+        framework_model_dir = os.path.join("_workspace", "torch_model")
+        timing_cache = os.path.join("_workspace", "timing_cache")
+        
         # model_name = pipeline_info.name()
         # Initialize demo
         demo = TensorrtTxt2ImgPipeline(
@@ -774,31 +805,33 @@ def run_tensorrt_demo(
             max_batch_size=max_batch_size,
             use_cuda_graph=True,
         )
+        
+        # Load TensorRT engines and pytorch modules
+        demo.engine_helper.load_engines(
+            engine_dir,
+            framework_model_dir,
+            onnx_dir,
+            14,
+            opt_batch_size=batch_size,
+            opt_image_height=height,
+            opt_image_width=width,
+            force_export=False,
+            force_optimize=False,
+            force_build=False,
+            static_batch=True,
+            static_shape=True,
+            enable_refit=False,
+            enable_preview=False,
+            enable_all_tactics=False,
+            timing_cache=timing_cache,
+            onnx_refit_dir=None,
+        )
+        
+        # activate engines
+        max_device_memory = max(demo.engine_helper.max_device_memory(), demo.engine_helper.max_device_memory())
+        _, shared_device_memory = cudart.cudaMalloc(max_device_memory)
+        demo.engine_helper.activate_engines(shared_device_memory)
 
-    # Load TensorRT engines and pytorch modules
-    demo.loadEngines(
-        engine_dir,
-        framework_model_dir,
-        onnx_dir,
-        14,
-        opt_batch_size=batch_size,
-        opt_image_height=height,
-        opt_image_width=width,
-        force_export=False,
-        force_optimize=False,
-        force_build=False,
-        static_batch=True,
-        static_shape=True,
-        enable_refit=False,
-        enable_preview=False,
-        enable_all_tactics=False,
-        timing_cache=timing_cache,
-        onnx_refit_dir=None,
-    )
-
-    max_device_memory = max(demo.calculateMaxDeviceMemory(), demo.calculateMaxDeviceMemory())
-    _, shared_device_memory = cudart.cudaMalloc(max_device_memory)
-    demo.activateEngines(shared_device_memory)
 
     seed = 123
     demo.loadResources(height, width, batch_size, seed)
@@ -899,7 +932,7 @@ def run_tensorrt_xl(
             onnx_dir = os.path.join("_original", short_name, "onnx")
             engine_dir = os.path.join("_original", short_name, f"trt_engine_{batch_size}_{height}_{width}")
             output_dir = os.path.join("_original", short_name, "output")
-            framework_model_dir = os.path.join("_workspace", "torch_model")
+            framework_model_dir = os.path.join("_original", "torch_model")
             timing_cache = os.path.join("_original", "timing_cache")
 
             # Initialize demo
@@ -944,6 +977,11 @@ def run_tensorrt_xl(
 
         refiner_pipeline_info = PipelineInfo(version, is_sd_xl_refiner=True)
         demo_refiner = init_pipeline(Img2ImgXLPipeline, refiner_pipeline_info)
+        
+        max_device_memory = max(demo_base.calculateMaxDeviceMemory(), demo_refiner.calculateMaxDeviceMemory())
+        _, shared_device_memory = cudart.cudaMalloc(max_device_memory)
+        demo_base.activateEngines(shared_device_memory)
+        demo_refiner.activateEngines(shared_device_memory)
     else:
         from tensorrt_img2img_xl_pipeline import TensorrtImg2ImgXLPipeline
         from tensorrt_txt2img_xl_pipeline import TensorrtTxt2ImgXLPipeline
@@ -970,7 +1008,7 @@ def run_tensorrt_xl(
                 framework_model_dir=framework_model_dir,
             )
 
-            demo.loadEngines(
+            demo.engine_helper.load_engines(
                 engine_dir,
                 framework_model_dir,
                 onnx_dir,
@@ -997,10 +1035,11 @@ def run_tensorrt_xl(
         refiner_pipeline_info = PipelineInfo(version, is_sd_xl_refiner=True)
         demo_refiner = init_pipeline(TensorrtImg2ImgXLPipeline, refiner_pipeline_info)
 
-    max_device_memory = max(demo_base.calculateMaxDeviceMemory(), demo_refiner.calculateMaxDeviceMemory())
-    _, shared_device_memory = cudart.cudaMalloc(max_device_memory)
-    demo_base.activateEngines(shared_device_memory)
-    demo_refiner.activateEngines(shared_device_memory)
+        max_device_memory = max(demo_base.engine_helper.max_device_memory(), demo_refiner.engine_helper.max_device_memory())
+        _, shared_device_memory = cudart.cudaMalloc(max_device_memory)
+        demo_base.engine_helper.activate_engines(shared_device_memory)
+        demo_refiner.engine_helper.activate_engines(shared_device_memory)
+    
     seed = 123
     demo_base.loadResources(image_height, image_width, batch_size, seed)
     demo_refiner.loadResources(image_height, image_width, batch_size, seed)

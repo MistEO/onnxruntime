@@ -26,7 +26,7 @@ Modified from stable_diffusion_tensorrt_txt2img.py in diffusers and TensorRT dem
 import logging
 import os
 import tempfile
-from typing import Optional
+from typing import Optional, List
 
 import onnx
 import onnx_graphsurgeon as gs
@@ -104,6 +104,18 @@ class PipelineInfo:
 
     def use_safetensors(self) -> bool:
         return self.is_sd_xl()
+    
+    def stages(self) -> List[str]:
+        if self.is_sd_xl_base():
+            return ["clip", "clip2", "unetxl"]
+        
+        if self.is_sd_xl_refiner():
+            return ["clip2", "unetxl", "vae"]
+        
+        return ["clip", "unet", "vae"]
+    
+    def vae_scaling_factor(self) -> float:
+        return 0.13025 if self.is_sd_xl() else 0.18215
 
     @staticmethod
     def supported_versions():

@@ -14,6 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+# -------------------------------------------------------------------------
+# Modifications: use pipeline info and refactoring models.
+#
+# Copyright (c) Microsoft Corporation.  All rights reserved.
+# Licensed under the MIT License.
+# --------------------------------------------------------------------------
 
 import time
 
@@ -38,7 +44,7 @@ class TensorrtTxt2ImgPipeline(TensorrtStableDiffusionPipeline):
             pipeline_info (PipelineInfo):
                 Version and Type of stable diffusion pipeline.
         """
-        super().__init__(pipeline_info, **kwargs, stages=["clip", "unet", "vae"])
+        super().__init__(pipeline_info, **kwargs)
 
     def infer(self, prompt, negative_prompt, image_height, image_width, seed=None, warmup=False, verbose=False):
         """

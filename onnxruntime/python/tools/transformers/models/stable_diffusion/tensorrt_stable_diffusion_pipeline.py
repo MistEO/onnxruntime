@@ -14,6 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+# -------------------------------------------------------------------------
+# Modified from TensorRT demo diffusion: add pipeline info, refactoring models, use onnxruntime
+#
+# Copyright (c) Microsoft Corporation.  All rights reserved.
+# Licensed under the MIT License.
+# --------------------------------------------------------------------------
 
 import gc
 import os
@@ -31,17 +37,17 @@ from trt_demo.utilities import (
     UniPCMultistepScheduler,
     save_image,
 )
+from tensorrt_engine_helper import TensorrtEngineHelper
 
 
 class TensorrtStableDiffusionPipeline:
     """
-    Stable Diffusion pipeline using NVidia TensorRT.
+    Stable Diffusion pipeline using TensorRT.
     """
 
     def __init__(
         self,
         pipeline_info: PipelineInfo,
-        stages=["clip", "unet", "vae"],
         max_batch_size=16,
         denoising_steps=50,
         scheduler="DDIM",
@@ -52,9 +58,8 @@ class TensorrtStableDiffusionPipeline:
         verbose=False,
         nvtx_profile=False,
         use_cuda_graph=False,
-        vae_scaling_factor=0.18215,
         framework_model_dir="pytorch_model",
-        controlnet=None,
+        engine_name = 'tensorrt',
     ):
         """
         Initializes the Diffusion pipeline.
@@ -86,12 +91,10 @@ class TensorrtStableDiffusionPipeline:
                 Insert NVTX profiling markers.
             use_cuda_graph (bool):
                 Use CUDA graph to capture engine execution and then launch inference
-            vae_scaling_factor (float):
-                VAE scaling factor
             framework_model_dir (str):
                 cache directory for framework checkpoints
-            controlnet (str):
-                Which ControlNet/ControlNets to use.
+            engine_name (str)
+                engine name like "tensorrt", or abbreviation of onnxruntime execution provider like "ort_cuda" or "ort_trt"
         """
 
         self.pipeline_info = pipeline_info
@@ -100,7 +103,7 @@ class TensorrtStableDiffusionPipeline:
         self.denoising_steps = denoising_steps
         assert guidance_scale > 1.0
         self.guidance_scale = guidance_scale
-        self.vae_scaling_factor = vae_scaling_factor
+        self.vae_scaling_factor = pipeline_info.vae_scaling_factor()
 
         self.max_batch_size = max_batch_size
 
@@ -116,8 +119,6 @@ class TensorrtStableDiffusionPipeline:
         self.torch_device = torch.device(device, torch.cuda.current_device())
         self.verbose = verbose
         self.nvtx_profile = nvtx_profile
-
-        self.controlnet = controlnet
 
         # Schedule options
         sched_opts = {"num_train_timesteps": 1000, "beta_start": 0.00085, "beta_end": 0.012}
@@ -135,24 +136,38 @@ class TensorrtStableDiffusionPipeline:
         else:
             raise ValueError("Scheduler should be either DDIM, EulerA or UniPC")
 
-        self.stages = stages
+        self.stages = pipeline_info.stages()
 
         self.vae_torch_fallback = self.pipeline_info.is_sd_xl()
 
         self.use_cuda_graph = use_cuda_graph
 
-        # initialized in loadResources()
-        self.stream = None
         self.tokenizer = None
-        # initialized in loadEngines()
-        self.models = {}
-        self.torch_models = {}
-        self.engine = {}
-        self.shared_device_memory = None
-
+        self.tokenizer2 = None
+        
+        # use in child class
+        self.refiner = pipeline_info.is_sd_xl_refiner()
+        
+        # backend engine
+        if engine_name in ["tensorrt", "tensorrt_demo"]:
+            self.engine_helper = TensorrtEngineHelper(pipeline_info, max_batch_size, hf_token, device, use_cuda_graph)
+        else:
+            self.engine_helper = None
+            
     def loadResources(self, image_height, image_width, batch_size, seed):
         # Initialize noise generator
         self.generator = torch.Generator(device="cuda").manual_seed(seed) if seed else None
+
+        # Load text tokenizer
+        if not self.pipeline_info.is_sd_xl_refiner():
+            self.tokenizer = get_tokenizer(
+                self.pipeline_info, self.framework_model_dir, self.hf_token, subfolder="tokenizer"
+            )
+
+        if self.pipeline_info.is_sd_xl():
+            self.tokenizer2 = get_tokenizer(
+                self.pipeline_info, self.framework_model_dir, self.hf_token, subfolder="tokenizer_2"
+        )
 
         # Pre-compute latent input scales and linear multistep coefficients
         self.scheduler.set_timesteps(self.denoising_steps)
@@ -163,261 +178,18 @@ class TensorrtStableDiffusionPipeline:
         for stage in ["clip", "denoise", "vae", "vae_encoder"]:
             for marker in ["start", "stop"]:
                 self.events[stage + "-" + marker] = cudart.cudaEventCreate()[1]
-        err, self.stream = cudart.cudaStreamCreate()
+        
+        self.engine_helper.load_resources(image_height, image_width, batch_size)
 
-        # Allocate buffers for TensorRT engine bindings
-        for model_name, obj in self.models.items():
-            if model_name == "vae" and self.vae_torch_fallback:
-                continue
-            self.engine[model_name].allocate_buffers(
-                shape_dict=obj.get_shape_dict(batch_size, image_height, image_width), device=self.device
-            )
-
-    def teardown(self):
+    def teardown(self):        
         for e in self.events.values():
             cudart.cudaEventDestroy(e)
-
-        for engine in self.engine.values():
-            del engine
-
-        if self.shared_device_memory:
-            cudart.cudaFree(self.shared_device_memory)
-
-        cudart.cudaStreamDestroy(self.stream)
-        del self.stream
-
-    def cachedModelName(self, model_name):
-        if self.pipeline_info.is_inpaint():
-            model_name += "_inpaint"
-        return model_name
-
-    def getOnnxPath(self, model_name, onnx_dir, opt=True):
-        onnx_model_dir = os.path.join(onnx_dir, self.cachedModelName(model_name) + (".opt" if opt else ""))
-        os.makedirs(onnx_model_dir, exist_ok=True)
-        return os.path.join(onnx_model_dir, "model.onnx")
-
-    def getEnginePath(self, model_name, engine_dir):
-        return os.path.join(engine_dir, self.cachedModelName(model_name) + ".plan")
-
-    def loadEngines(
-        self,
-        engine_dir,
-        framework_model_dir,
-        onnx_dir,
-        onnx_opset,
-        opt_batch_size,
-        opt_image_height,
-        opt_image_width,
-        force_export=False,
-        force_optimize=False,
-        force_build=False,
-        static_batch=False,
-        static_shape=True,
-        enable_refit=False,
-        enable_preview=False,
-        enable_all_tactics=False,
-        timing_cache=None,
-        onnx_refit_dir=None,
-    ):
-        """
-        Build and load engines for TensorRT accelerated inference.
-        Export ONNX models first, if applicable.
-
-        Args:
-            engine_dir (str):
-                Directory to write the TensorRT engines.
-            framework_model_dir (str):
-                Directory to write the framework model ckpt.
-            onnx_dir (str):
-                Directory to write the ONNX models.
-            onnx_opset (int):
-                ONNX opset version to export the models.
-            opt_batch_size (int):
-                Batch size to optimize for during engine building.
-            opt_image_height (int):
-                Image height to optimize for during engine building. Must be a multiple of 8.
-            opt_image_width (int):
-                Image width to optimize for during engine building. Must be a multiple of 8.
-            force_export (bool):
-                Force re-exporting the ONNX models.
-            force_optimize (bool):
-                Force re-optimizing the ONNX models.
-            force_build (bool):
-                Force re-building the TensorRT engine.
-            static_batch (bool):
-                Build engine only for specified opt_batch_size.
-            static_shape (bool):
-                Build engine only for specified opt_image_height & opt_image_width. Default = True.
-            enable_refit (bool):
-                Build engines with refit option enabled.
-            enable_preview (bool):
-                Enable TensorRT preview features.
-            enable_all_tactics (bool):
-                Enable all tactic sources during TensorRT engine builds.
-            timing_cache (str):
-                Path to the timing cache to accelerate build or None
-            onnx_refit_dir (str):
-                Directory containing refit ONNX models.
-        """
-        # Create directory
-        for directory in [engine_dir, onnx_dir]:
-            if not os.path.exists(directory):
-                print(f"[I] Create directory: {directory}")
-                pathlib.Path(directory).mkdir(parents=True)
-
-        # Load text tokenizer
-        # FIXME - SDXL
-        if not self.pipeline_info.is_sd_xl_refiner():
-            self.tokenizer = get_tokenizer(
-                self.pipeline_info, framework_model_dir, self.hf_token, subfolder="tokenizer"
-            )
-
-        if "clip" in self.stages:
-            self.models["clip"] = CLIP(
-                self.pipeline_info,
-                None,  # not loaded yet
-                device=self.torch_device,
-                max_batch_size=self.max_batch_size,
-                clip_skip=0,
-            )
-
-        if "clip2" in self.stages:
-            self.models["clip2"] = CLIPWithProj(
-                self.pipeline_info,
-                None,  # not loaded yet
-                device=self.torch_device,
-                max_batch_size=self.max_batch_size,
-                clip_skip=0,
-            )
-
-        if "unet" in self.stages:
-            self.models["unet"] = UNet(
-                self.pipeline_info,
-                None,  # not loaded yet
-                device=self.torch_device,
-                fp16=True,
-                max_batch_size=self.max_batch_size,
-                unet_dim=(9 if self.pipeline_info.is_inpaint() else 4),
-                # controlnet=get_controlnets_path(self.controlnet),
-            )
-
-        if "unetxl" in self.stages:
-            self.models["unetxl"] = UNetXL(
-                self.pipeline_info,
-                None,  # not loaded yet
-                device=self.torch_device,
-                fp16=True,
-                max_batch_size=self.max_batch_size,
-                unet_dim=4,
-                time_dim=(5 if self.pipeline_info.is_sd_xl_refiner() else 6),
-            )
-
-        # VAE Decoder
-        if "vae" in self.stages:
-            self.models["vae"] = VAE(
-                self.pipeline_info,
-                None,  # not loaded yet
-                device=self.torch_device,
-                max_batch_size=self.max_batch_size,
-            )
-
-            if self.vae_torch_fallback:
-                self.torch_models["vae"] = self.models["vae"].load_model(framework_model_dir, self.hf_token)
-
-        # Export models to ONNX
-        for model_name, obj in self.models.items():
-            if model_name == "vae" and self.vae_torch_fallback:
-                continue
-            engine_path = self.getEnginePath(model_name, engine_dir)
-            if force_export or force_build or not os.path.exists(engine_path):
-                onnx_path = self.getOnnxPath(model_name, onnx_dir, opt=False)
-                onnx_opt_path = self.getOnnxPath(model_name, onnx_dir)
-                if force_export or not os.path.exists(onnx_opt_path):
-                    if force_export or not os.path.exists(onnx_path):
-                        print(f"Exporting model: {onnx_path}")
-                        model = obj.load_model(framework_model_dir, self.hf_token)
-                        with torch.inference_mode(), torch.autocast("cuda"):
-                            inputs = obj.get_sample_input(1, opt_image_height, opt_image_width)
-                            torch.onnx.export(
-                                model,
-                                inputs,
-                                onnx_path,
-                                export_params=True,
-                                opset_version=onnx_opset,
-                                do_constant_folding=True,
-                                input_names=obj.get_input_names(),
-                                output_names=obj.get_output_names(),
-                                dynamic_axes=obj.get_dynamic_axes(),
-                            )
-                        del model
-                        torch.cuda.empty_cache()
-                        gc.collect()
-                    else:
-                        print(f"Found cached model: {onnx_path}")
-
-                    # Optimize onnx
-                    if force_optimize or not os.path.exists(onnx_opt_path):
-                        print(f"Generating optimizing model: {onnx_opt_path}")
-                        obj.optimize_trt(onnx_path, onnx_opt_path)
-                    else:
-                        print(f"Found cached optimized model: {onnx_opt_path} ")
-
-        # Build TensorRT engines
-        for model_name, obj in self.models.items():
-            if model_name == "vae" and self.vae_torch_fallback:
-                continue
-            engine_path = self.getEnginePath(model_name, engine_dir)
-            engine = Engine(engine_path)
-            onnx_path = self.getOnnxPath(model_name, onnx_dir, opt=False)
-            onnx_opt_path = self.getOnnxPath(model_name, onnx_dir)
-
-            if force_build or not os.path.exists(engine.engine_path):
-                engine.build(
-                    onnx_opt_path,
-                    fp16=True,
-                    input_profile=obj.get_input_profile(
-                        opt_batch_size,
-                        opt_image_height,
-                        opt_image_width,
-                        static_batch,
-                        static_shape,
-                    ),
-                    enable_refit=enable_refit,
-                    enable_preview=enable_preview,
-                    enable_all_tactics=enable_all_tactics,
-                    timing_cache=timing_cache,
-                    update_output_names=None,
-                )
-            self.engine[model_name] = engine
-
-        # Load TensorRT engines
-        for model_name, obj in self.models.items():
-            if model_name == "vae" and self.vae_torch_fallback:
-                continue
-            self.engine[model_name].load()
-            if onnx_refit_dir:
-                onnx_refit_path = self.getOnnxPath(model_name, onnx_refit_dir)
-                if os.path.exists(onnx_refit_path):
-                    self.engine[model_name].refit(onnx_opt_path, onnx_refit_path)
-
-    def calculateMaxDeviceMemory(self):
-        max_device_memory = 0
-        for _model_name, engine in self.engine.items():
-            max_device_memory = max(max_device_memory, engine.engine.device_memory_size)
-        return max_device_memory
-
-    def activateEngines(self, shared_device_memory=None):
-        if shared_device_memory is None:
-            max_device_memory = self.calculateMaxDeviceMemory()
-            _, shared_device_memory = cudart.cudaMalloc(max_device_memory)
-        self.shared_device_memory = shared_device_memory
-        # Load and activate TensorRT engines
-        for engine in self.engine.values():
-            engine.activate(reuse_device_memory=self.shared_device_memory)
+            
+        if self.engine_helper:
+            self.engine_helper.teardown()
 
     def runEngine(self, model_name, feed_dict):
-        engine = self.engine[model_name]
-        return engine.infer(feed_dict, self.stream, use_cuda_graph=self.use_cuda_graph)
+        self.engine_helper.run_engine(model_name, feed_dict)
 
     def initialize_latents(self, batch_size, unet_channels, latent_height, latent_width):
         latents_dtype = torch.float32  # text_embeddings.dtype
@@ -495,9 +267,9 @@ class TensorrtStableDiffusionPipeline:
             .to(self.device)
         )
 
-        text_input_ids_inp = text_input_ids
         # NOTE: output tensor for CLIP must be cloned because it will be overwritten when called again for negative prompt
-        outputs = self.runEngine(encoder, {"input_ids": text_input_ids_inp})
+        outputs = self.runEngine(encoder, {"input_ids": text_input_ids})
+        print(encoder, "input_ids", text_input_ids, "output", outputs)
         text_embeddings = outputs["text_embeddings"].clone()
         if output_hidden_states:
             hidden_states = outputs["hidden_states"].clone()
@@ -514,8 +286,8 @@ class TensorrtStableDiffusionPipeline:
             .input_ids.type(torch.int32)
             .to(self.device)
         )
-        uncond_input_ids_inp = uncond_input_ids
-        outputs = self.runEngine(encoder, {"input_ids": uncond_input_ids_inp})
+
+        outputs = self.runEngine(encoder, {"input_ids": uncond_input_ids})
         uncond_embeddings = outputs["text_embeddings"]
         if output_hidden_states:
             uncond_hidden_states = outputs["hidden_states"]
@@ -633,19 +405,13 @@ class TensorrtStableDiffusionPipeline:
         if self.nvtx_profile:
             nvtx_vae = nvtx.start_range(message="vae", color="red")
         cudart.cudaEventRecord(self.events["vae-start"], 0)
-        if self.vae_torch_fallback:
-            latents = latents.to(dtype=torch.float32)
-            self.torch_models["vae"] = self.torch_models["vae"].to(dtype=torch.float32)
-            images = self.torch_models["vae"](latents)["sample"]
-        else:
-            images = self.runEngine("vae", {"latent": latents})["images"]
-
+        images = self.engine_helper.vae_decode(latents)
         cudart.cudaEventRecord(self.events["vae-stop"], 0)
         if self.nvtx_profile:
             nvtx.end_range(nvtx_vae)
         return images
 
-    def print_summary(self, denoising_steps, tic, toc, batch_size, vae_enc=False, controlnet=False):
+    def print_summary(self, denoising_steps, tic, toc, batch_size, vae_enc=False):
         print("|------------|--------------|")
         print("| {:^10} | {:^12} |".format("Module", "Latency"))
         print("|------------|--------------|")
@@ -661,20 +427,12 @@ class TensorrtStableDiffusionPipeline:
                 "CLIP", cudart.cudaEventElapsedTime(self.events["clip-start"], self.events["clip-stop"])[1]
             )
         )
-        if controlnet:
-            print(
-                "| {:^10} | {:>9.2f} ms |".format(
-                    "CNet x " + str(denoising_steps),
-                    cudart.cudaEventElapsedTime(self.events["denoise-start"], self.events["denoise-stop"])[1],
-                )
+        print(
+            "| {:^10} | {:>9.2f} ms |".format(
+                "UNet x " + str(denoising_steps),
+                cudart.cudaEventElapsedTime(self.events["denoise-start"], self.events["denoise-stop"])[1],
             )
-        else:
-            print(
-                "| {:^10} | {:>9.2f} ms |".format(
-                    "UNet x " + str(denoising_steps),
-                    cudart.cudaEventElapsedTime(self.events["denoise-start"], self.events["denoise-stop"])[1],
-                )
-            )
+        )
         print(
             "| {:^10} | {:>9.2f} ms |".format(
                 "VAE-Dec", cudart.cudaEventElapsedTime(self.events["vae-start"], self.events["vae-stop"])[1]
