@@ -225,7 +225,6 @@ Status PagedAttention<T>::CheckInputs(
   const Tensor* query = context->Input<Tensor>(0);
   const Tensor* key_cache = context->Input<Tensor>(3);
   const Tensor* value_cache = context->Input<Tensor>(4);
-  const Tensor* t_input_metadata = context->Input<Tensor>(5);
   const Tensor* positions = context->Input<Tensor>(6);
 
   const auto& query_shape = query->Shape();
@@ -240,8 +239,7 @@ Status PagedAttention<T>::CheckInputs(
     seq_len = query_shape[1];
   }
 
-  if (t_input_metadata && batch_size != 1 &&
-      input_metadata->num_prompt_tokens * input_metadata->num_generation_tokens != 0) {
+  if (batch_size != 1 && input_metadata->num_prompt_tokens * input_metadata->num_generation_tokens != 0) {
     return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL,
                            "Invalid input_medata, batch_size should be 1 when prompt"
                            " and generation tokens are both present");
@@ -408,7 +406,7 @@ Status PagedAttention<T>::RunMultiHeadAttention(Tensor* output, OpKernelContext*
 
 InputMetadata* GetOrCreateMedataFromInput(OpKernelContext* context, InputMetadata* s_input_metadata, int8_t* meta_data_space) {
   const Tensor* t_input_metadata = context->Input<Tensor>(5);
-  if (t_input_metadata && t_input_metadata->Data<int64_t>()) {
+  if (t_input_metadata && t_input_metadata->Data<int64_t>()[0]) {
     return reinterpret_cast<InputMetadata*>(t_input_metadata->Data<int64_t>()[0]);
   }
 
@@ -420,7 +418,10 @@ InputMetadata* GetOrCreateMedataFromInput(OpKernelContext* context, InputMetadat
   std::vector<int64_t> cpu_position(positions->Shape().Size());
   CUDA_CALL_THROW(cudaMemcpy(cpu_position.data(), positions->DataRaw(),
                              positions->SizeInBytes(), cudaMemcpyDeviceToHost));
-
+  while (cpu_position.back() == 0) {
+    cpu_position.pop_back();
+    seq_len--;
+  }
   InputMetadata* input_metadata = s_input_metadata;
   input_metadata->num_valid_tokens = seq_len;
 
@@ -485,13 +486,12 @@ InputMetadata* GetOrCreateMedataFromInput(OpKernelContext* context, InputMetadat
     // copy to cuda
     CUDA_CALL_THROW(cudaMemcpy(meta_data_space, seqstart.data(),
                                seqstart.size() * sizeof(int32_t), cudaMemcpyHostToDevice));
+    input_metadata->attn_bias.q_seqinfo.seqstart = reinterpret_cast<int64_t>(meta_data_space);
+    input_metadata->attn_bias.q_seqinfo.max_seqlen = input_metadata->num_prompt_tokens;
+    input_metadata->attn_bias.batchsize = 1;
     meta_data_space += seqstart.size() * sizeof(int32_t);
   }
-  input_metadata->attn_bias.q_seqinfo.seqstart = reinterpret_cast<int64_t>(meta_data_space);
-  input_metadata->attn_bias.q_seqinfo.max_seqlen = input_metadata->num_prompt_tokens;
-  input_metadata->attn_bias.k_seqinfo.seqstart = reinterpret_cast<int64_t>(meta_data_space);
-  input_metadata->attn_bias.k_seqinfo.max_seqlen = input_metadata->num_prompt_tokens;
-  input_metadata->attn_bias.batchsize = 1;
+
   return input_metadata;
 }
 
@@ -508,7 +508,7 @@ Status PagedAttention<T>::ComputeInternal(OpKernelContext* context) const {
   ORT_UNUSED_PARAMETER(kv_quant_param);
 
   int seq_len = query->Shape().NumDimensions() == 3? query->Shape()[1] : query->Shape()[0];
-  auto meta_data_space = this->template GetScratchBuffer<int8_t>(seq_len * 3 * sizeof(int32_t), context->GetComputeStream());
+  auto meta_data_space = this->template GetScratchBuffer<int8_t>(std::max(1024, seq_len * 3) * sizeof(int32_t), context->GetComputeStream());
   InputMetadata self_build_input_metadata;
   InputMetadata* input_metadata = GetOrCreateMedataFromInput(context, &self_build_input_metadata, meta_data_space.get());
 
