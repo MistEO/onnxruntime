@@ -1353,20 +1353,25 @@ def main():
     args = parse_arguments()
     print(args)
 
-    if args.enable_cuda_graph and args.engine != "tensorrt_demo":
-        if not (args.engine == "onnxruntime" and args.provider in ["cuda", "tensorrt"] and args.pipeline is None):
-            raise ValueError("The stable diffusion pipeline does not support CUDA graph.")
+    if args.engine == "onnxruntime":
+        if args.version in ["2.1"]:
+            # Set a flag to avoid overflow in attention, which causes black image output in SD 2.1 model.
+            # The environment variables shall be set before the first run of Attention or MultiHeadAttention operator.
+            os.environ["ORT_DISABLE_TRT_FLASH_ATTENTION"] = "1"
 
         from packaging import version
-
         from onnxruntime import __version__ as ort_version
+        if version.parse(ort_version) == version.parse("1.16.0"):
+            # ORT 1.16 has a bug that might trigger Attention RuntimeError when latest fusion script is applied on clip model.
+            # The walkaround is to enable fused causal attention, or disable Attention fusion for clip model.
+            os.environ["ORT_ENABLE_FUSED_CAUSAL_ATTENTION"] = "1"
 
-        if version.parse(ort_version) < version.parse("1.16"):
-            raise ValueError(
-                "CUDA graph requires ONNX Runtime 1.16. You can install nightly like the following:\n"
-                " pip uninstall onnxruntime-gpu\n"
-                " pip install ort-nightly-gpu -i https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/ORT-Nightly/pypi/simple/"
-            )
+        if args.enable_cuda_graph:
+            if not (args.engine == "onnxruntime" and args.provider in ["cuda", "tensorrt"] and args.pipeline is None):
+                raise ValueError("The stable diffusion pipeline does not support CUDA graph.")
+
+            if version.parse(ort_version) < version.parse("1.16"):
+                raise ValueError("CUDA graph requires ONNX Runtime 1.16 or later")
 
     coloredlogs.install(fmt="%(funcName)20s: %(message)s")
 
@@ -1416,11 +1421,6 @@ def main():
         assert args.pipeline and os.path.isdir(
             args.pipeline
         ), "--pipeline should be specified for the directory of ONNX models"
-
-        if args.version in ["2.1"]:
-            # Set a flag to avoid overflow in attention, which causes black image output in SD 2.1 model
-            # This shall be done before the first inference run.
-            os.environ["ORT_DISABLE_TRT_FLASH_ATTENTION"] = "1"
 
         result = run_ort(
             sd_model,
