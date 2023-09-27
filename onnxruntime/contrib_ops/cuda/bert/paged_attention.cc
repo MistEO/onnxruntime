@@ -228,8 +228,7 @@ Status PagedAttention<T>::CheckInputs(
   const Tensor* positions = context->Input<Tensor>(6);
 
   const auto& query_shape = query->Shape();
-  if (query_shape.NumDimensions() < 2 || query_shape.NumDimensions() > 3 ||
-      (query_shape.NumDimensions() == 3 && query_shape[0] != 1)) {
+  if (query_shape.NumDimensions() < 2 || query_shape.NumDimensions() > 3) {
     return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "Invalid query shape: ", query_shape, " expected 2 or 3 dimensions");
   }
   int64_t batch_size = 1;
@@ -255,7 +254,8 @@ Status PagedAttention<T>::CheckInputs(
                            key_cache->Shape(), " ", value_cache->Shape());
   }
 
-  if(positions && positions->Shape()[positions->Shape().NumDimensions()-1] != seq_len) {
+  if (positions && positions->Shape().Size() > 0 &&
+      positions->Shape()[positions->Shape().NumDimensions() - 1] != batch_size * seq_len) {
     return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "Invalid positions shape: ", positions->Shape());
   }
 
