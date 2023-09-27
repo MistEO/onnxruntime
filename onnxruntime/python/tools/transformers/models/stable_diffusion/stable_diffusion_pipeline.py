@@ -20,7 +20,6 @@
 # limitations under the License.
 # --------------------------------------------------------------------------
 
-import gc
 import os
 import pathlib
 
@@ -28,11 +27,10 @@ import numpy as np
 import nvtx
 import torch
 from cuda import cudart
-from diffusion_models import CLIP, VAE, CLIPWithProj, PipelineInfo, UNet, UNetXL, get_tokenizer
+from diffusion_models import PipelineInfo, get_tokenizer
 from tensorrt_engine_helper import TensorrtEngineHelper
 from trt_demo.utilities import (
     DDIMScheduler,
-    Engine,
     EulerAncestralDiscreteScheduler,
     UniPCMultistepScheduler,
     save_image,

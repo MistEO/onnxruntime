@@ -32,14 +32,11 @@ pip install --upgrade polygraphy>=0.47.0 onnx-graphsurgeon --extra-index-url htt
 pip install onnxruntime-gpu
 """
 
-import gc
 import logging
 import os
-import shutil
 from typing import List, Optional, Union
 
 import torch
-from cuda import cudart
 from diffusers.models import AutoencoderKL, UNet2DConditionModel
 from diffusers.pipelines.stable_diffusion import (
     StableDiffusionPipeline,
@@ -48,17 +45,15 @@ from diffusers.pipelines.stable_diffusion import (
 )
 from diffusers.schedulers import DDIMScheduler
 from diffusers.utils import DIFFUSERS_CACHE
-from diffusion_models import CLIP, VAE, CLIPWithProj, PipelineInfo, UNet, UNetXL
+from diffusion_models import PipelineInfo
 from huggingface_hub import snapshot_download
-from ort_utils import OrtTensorrtEngine, build_engines, denoise_latent, encode_prompt, load_models, run_engine
+from ort_utils import build_engines, StableDiffusionPipelineMixin, run_engine
 from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
-
-import onnxruntime as ort
 
 logger = logging.getLogger(__name__)
 
 
-class OnnxruntimeTensorRTStableDiffusionPipeline(StableDiffusionPipeline):
+class OnnxruntimeTensorRTStableDiffusionPipeline(StableDiffusionPipelineMixin, StableDiffusionPipeline):
     r"""
     Pipeline for text-to-image generation using TensorRT execution provider in ONNX Runtime.
 
@@ -86,7 +81,6 @@ class OnnxruntimeTensorRTStableDiffusionPipeline(StableDiffusionPipeline):
         force_engine_rebuild: bool = False,
         enable_cuda_graph: bool = False,
         pipeline_info: Optional[PipelineInfo] = None,
-        stages=["clip", "unet", "vae"],
     ):
         super().__init__(
             vae, text_encoder, tokenizer, unet, scheduler, safety_checker, feature_extractor, requires_safety_checker
@@ -102,7 +96,7 @@ class OnnxruntimeTensorRTStableDiffusionPipeline(StableDiffusionPipeline):
         self.force_engine_rebuild = force_engine_rebuild
         self.enable_cuda_graph = enable_cuda_graph
 
-        # Although cuda graph requires static input shape, engine built with dyamic batch gets better performance in T4.
+        # Although cuda graph requires static input shape, engine built with dynamic batch gets better performance in T4.
         # Use static batch could reduce GPU memory footprint.
         self.build_static_batch = False
 
@@ -118,33 +112,7 @@ class OnnxruntimeTensorRTStableDiffusionPipeline(StableDiffusionPipeline):
         self.engines = {}  # loaded in build_engines()
 
         self.pipeline_info = pipeline_info
-        self.stages = stages
-
-    def __load_models(self):
-        load_models(self)
-
-    @classmethod
-    def set_cached_folder(cls, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs):
-        cache_dir = kwargs.pop("cache_dir", DIFFUSERS_CACHE)
-        resume_download = kwargs.pop("resume_download", False)
-        proxies = kwargs.pop("proxies", None)
-        local_files_only = kwargs.pop("local_files_only", False)
-        use_auth_token = kwargs.pop("use_auth_token", None)
-        revision = kwargs.pop("revision", None)
-
-        cls.cached_folder = (
-            pretrained_model_name_or_path
-            if os.path.isdir(pretrained_model_name_or_path)
-            else snapshot_download(
-                pretrained_model_name_or_path,
-                cache_dir=cache_dir,
-                resume_download=resume_download,
-                proxies=proxies,
-                local_files_only=local_files_only,
-                use_auth_token=use_auth_token,
-                revision=revision,
-            )
-        )
+        self.stages = pipeline_info.stages()
 
     def to(
         self,
@@ -160,7 +128,7 @@ class OnnxruntimeTensorRTStableDiffusionPipeline(StableDiffusionPipeline):
         self.torch_device = self._execution_device
         logger.info(f"Running inference on device: {self.torch_device}")
 
-        self.__load_models()
+        self.load_models()
 
         self.engines = build_engines(
             self.models,
@@ -177,17 +145,6 @@ class OnnxruntimeTensorRTStableDiffusionPipeline(StableDiffusionPipeline):
         )
 
         return self
-
-    def __encode_prompt(self, prompt, negative_prompt):
-        return encode_prompt(self, prompt, negative_prompt)
-
-    def __denoise_latent(self, latents, text_embeddings, timesteps=None, mask=None, masked_image_latents=None):
-        return denoise_latent(self, latents, text_embeddings, timesteps, mask, masked_image_latents)
-
-    def __decode_latent(self, latents):
-        images = run_engine(self.engines["vae"], {"latent": latents})["images"]
-        images = (images / 2 + 0.5).clamp(0, 1)
-        return images.cpu().permute(0, 2, 3, 1).float().numpy()
 
     def __allocate_buffers(self, image_height, image_width, batch_size):
         # Allocate output tensors for I/O bindings
@@ -261,7 +218,7 @@ class OnnxruntimeTensorRTStableDiffusionPipeline(StableDiffusionPipeline):
 
         with torch.inference_mode(), torch.autocast("cuda"):
             # CLIP text encoder
-            text_embeddings = self.__encode_prompt(prompt, negative_prompt)
+            text_embeddings = self.encode_prompt(self.engines["clip"], prompt, negative_prompt)
 
             # Pre-initialize latents
             num_channels_latents = self.unet.config.in_channels
@@ -276,10 +233,10 @@ class OnnxruntimeTensorRTStableDiffusionPipeline(StableDiffusionPipeline):
             )
 
             # UNet denoiser
-            latents = self.__denoise_latent(latents, text_embeddings)
+            latents = self.denoise_latent(self.engines["unet"], latents, text_embeddings)
 
             # VAE decode latent
-            images = self.__decode_latent(latents)
+            images = self.decode_latent(self.engines["vae"], latents)
 
         images, has_nsfw_concept = self.run_safety_checker(images, self.torch_device, text_embeddings.dtype)
         images = self.numpy_to_pil(images)

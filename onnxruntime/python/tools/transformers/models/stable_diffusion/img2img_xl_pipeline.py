@@ -1,3 +1,8 @@
+# -------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation.  All rights reserved.
+# Licensed under the MIT License.
+# --------------------------------------------------------------------------
+# Modified from TensorRT demo diffusion, which has the following license:
 #
 # SPDX-FileCopyrightText: Copyright (c) 1993-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
@@ -13,18 +18,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
-# -------------------------------------------------------------------------
-# Modifications: use pipeline info.
-#
-# Copyright (c) Microsoft Corporation.  All rights reserved.
-# Licensed under the MIT License.
 # --------------------------------------------------------------------------
 
 import time
 
 import torch
-from diffusion_models import PipelineInfo, get_tokenizer
+from diffusion_models import PipelineInfo
 from stable_diffusion_pipeline import StableDiffusionPipeline
 
 
@@ -178,15 +177,18 @@ class Img2ImgXLPipeline(StableDiffusionPipeline):
 
         return images, (e2e_toc - e2e_tic) * 1000.0
 
+
 class TensorrtImg2ImgXLPipeline(Img2ImgXLPipeline):
     """
     Stable Diffusion Img2Img XL pipeline using NVidia TensorRT.
     """
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs, engine_name="tensorrt")
 
     def run(self, *args, **kwargs):
-         import tensorrt as trt
-         from trt_demo.utilities import TRT_LOGGER
-         with trt.Runtime(TRT_LOGGER):
-                self.infer(*args, **kwargs)
+        import tensorrt as trt
+        from trt_demo.utilities import TRT_LOGGER
+
+        with trt.Runtime(TRT_LOGGER):
+            self.infer(*args, **kwargs)

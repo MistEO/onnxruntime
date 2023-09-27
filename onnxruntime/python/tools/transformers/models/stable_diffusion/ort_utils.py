@@ -7,21 +7,12 @@ import gc
 import logging
 import os
 import shutil
-from typing import List, Optional, Union
 
 import torch
 from cuda import cudart
-from diffusers.models import AutoencoderKL, UNet2DConditionModel
-from diffusers.pipelines.stable_diffusion import (
-    StableDiffusionPipeline,
-    StableDiffusionPipelineOutput,
-    StableDiffusionSafetyChecker,
-)
-from diffusers.schedulers import DDIMScheduler
-from diffusers.utils import DIFFUSERS_CACHE
-from diffusion_models import CLIP, VAE, CLIPWithProj, PipelineInfo, UNet, UNetXL
-from huggingface_hub import snapshot_download
-from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
+from typing import Union
+
+from diffusion_models import CLIP, VAE, CLIPWithProj, UNet, UNetXL
 
 import onnxruntime as ort
 from onnxruntime.transformers.io_binding_helper import CudaSession
@@ -157,12 +148,12 @@ class OrtTensorrtEngine(CudaSession):
             enable_cuda_graph,
         )
 
-        sess_options = ort.SessionOptions()
-        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
+        session_options = ort.SessionOptions()
+        session_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
         print("creating TRT EP session for ", onnx_path)
         ort_session = ort.InferenceSession(
             onnx_path,
-            sess_options,
+            session_options,
             providers=[
                 ("TensorrtExecutionProvider", self.ort_trt_provider_options),
             ],
@@ -354,145 +345,170 @@ def run_engine(engine, feed_dict):
     return engine.infer(feed_dict)
 
 
-def load_models(pipeline):
-    pipeline.embedding_dim = pipeline.text_encoder.config.hidden_size
+# -----------------------------------------------------------------------------------------------------
+# Utilities for both CUDA and TensorRT EP
+# -----------------------------------------------------------------------------------------------------
 
-    if "clip" in pipeline.stages:
-        pipeline.models["clip"] = CLIP(
-            pipeline.pipeline_info,
-            pipeline.text_encoder,
-            device=pipeline.torch_device,
-            max_batch_size=pipeline.max_batch_size,
-            clip_skip=0,
+class StableDiffusionPipelineMixin:
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+    def load_models(self):
+        #self.embedding_dim = self.text_encoder.config.hidden_size
+        assert self.pipeline_info.clip_embedding_dim() == self.text_encoder.config.hidden_size
+        
+        stages = self.pipeline_info.stages()
+        if "clip" in stages:
+            self.models["clip"] = CLIP(
+                self.pipeline_info,
+                self.text_encoder,
+                device=self.torch_device,
+                max_batch_size=self.max_batch_size,
+                clip_skip=0,
+            )
+
+        # if "clip2" in stages:
+        #     self.models["clip2"] = CLIPWithProj(
+        #         self.pipeline_info,
+        #         self.text_encoder_2,
+        #         device=self.torch_device,
+        #         max_batch_size=self.max_batch_size,
+        #         clip_skip=0,
+        #     )
+
+        if "unet" in stages:
+            self.models["unet"] = UNet(
+                self.pipeline_info,
+                self.unet,
+                device=self.torch_device,
+                fp16=True,
+                max_batch_size=self.max_batch_size,
+                unet_dim=(9 if self.pipeline_info.is_inpaint() else 4),
+            )
+
+        # if "unetxl" in stages:
+        #     self.models["unetxl"] = UNetXL(
+        #         self.pipeline_info,
+        #         self.unet,
+        #         device=self.torch_device,
+        #         fp16=True,
+        #         max_batch_size=self.max_batch_size,
+        #         unet_dim=4,
+        #         time_dim=(5 if pipeline_info.is_sd_xl_refiner() else 6),
+        #     )
+
+        # VAE Decoder
+        if "vae" in stages:
+            self.models["vae"] = VAE(
+                self.pipeline_info,
+                self.vae,
+                device=self.torch_device,
+                max_batch_size=self.max_batch_size,
+            )
+
+    def encode_prompt(self, clip_engine, prompt, negative_prompt):
+        r"""
+        Encodes the prompt into text encoder hidden states.
+
+        Args:
+                prompt (`str` or `List[str]`, *optional*):
+                prompt to be encoded
+            negative_prompt (`str` or `List[str]`, *optional*):
+                The prompt or prompts not to guide the image generation. If not defined, one has to pass
+                `negative_prompt_embeds`. instead. If not defined, one has to pass `negative_prompt_embeds`. instead.
+                Ignored when not using guidance (i.e., ignored if `guidance_scale` is less than `1`).
+        """
+        # Tokenize prompt
+        text_input_ids = (
+            self.tokenizer(
+                prompt,
+                padding="max_length",
+                max_length=self.tokenizer.model_max_length,
+                truncation=True,
+                return_tensors="pt",
+            )
+            .input_ids.type(torch.int32)
+            .to(self.torch_device)
         )
 
-    if "clip2" in pipeline.stages:
-        pipeline.models["clip2"] = CLIPWithProj(
-            pipeline.pipeline_info,
-            pipeline.text_encoder,
-            device=pipeline.torch_device,
-            max_batch_size=pipeline.max_batch_size,
-            clip_skip=0,
+        # NOTE: output tensor for CLIP must be cloned because it will be overwritten when called again for negative prompt
+        text_embeddings = run_engine(clip_engine, {"input_ids": text_input_ids})["text_embeddings"].clone()
+
+        # Tokenize negative prompt
+        uncond_input_ids = (
+            self.tokenizer(
+                negative_prompt,
+                padding="max_length",
+                max_length=self.tokenizer.model_max_length,
+                truncation=True,
+                return_tensors="pt",
+            )
+            .input_ids.type(torch.int32)
+            .to(self.torch_device)
         )
 
-    if "unet" in pipeline.stages:
-        pipeline.models["unet"] = UNet(
-            pipeline.pipeline_info,
-            pipeline.unet,
-            device=pipeline.torch_device,
-            fp16=True,
-            max_batch_size=pipeline.max_batch_size,
-            unet_dim=(9 if pipeline.pipeline_info.is_inpaint() else 4),
-            # controlnet=get_controlnets_path(pipeline.controlnet),
+        uncond_embeddings = run_engine(clip_engine, {"input_ids": uncond_input_ids})["text_embeddings"]
+
+        # Concatenate the unconditional and text embeddings into a single batch to avoid doing two forward passes for classifier free guidance
+        text_embeddings = torch.cat([uncond_embeddings, text_embeddings]).to(dtype=torch.float16)
+
+        return text_embeddings
+
+
+    def denoise_latent(self, unet_engine, latents, text_embeddings, timesteps=None, mask=None, masked_image_latents=None, timestep_fp16=False):
+        if not isinstance(timesteps, torch.Tensor):
+            timesteps = self.scheduler.timesteps
+            
+        for _step_index, timestep in enumerate(timesteps):
+            # Expand the latents if we are doing classifier free guidance
+            latent_model_input = torch.cat([latents] * 2)
+            latent_model_input = self.scheduler.scale_model_input(latent_model_input, timestep)
+            if isinstance(mask, torch.Tensor):
+                latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
+
+            # Predict the noise residual
+            timestep_float = timestep.to(torch.float16) if timestep_fp16 else timestep.to(torch.float32)
+
+            noise_pred = run_engine(
+                unet_engine,
+                {"sample": latent_model_input, "timestep": timestep_float, "encoder_hidden_states": text_embeddings},
+            )["latent"]
+
+            # Perform guidance
+            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+            noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+            latents = self.scheduler.step(noise_pred, timestep, latents).prev_sample
+
+        latents = 1.0 / 0.18215 * latents
+        return latents
+
+    def decode_latent(self, vae_engine, latents):
+        images = run_engine(vae_engine, {"latent": latents})["images"]
+        images = (images / 2 + 0.5).clamp(0, 1)
+        return images.cpu().permute(0, 2, 3, 1).float().numpy()
+    
+    def set_cached_folder(self, pretrained_model_name_or_path: Union[str, os.PathLike], **kwargs):
+        from diffusers.utils import DIFFUSERS_CACHE
+        from huggingface_hub import snapshot_download
+
+        cache_dir = kwargs.pop("cache_dir", DIFFUSERS_CACHE)
+        resume_download = kwargs.pop("resume_download", False)
+        proxies = kwargs.pop("proxies", None)
+        local_files_only = kwargs.pop("local_files_only", False)
+        use_auth_token = kwargs.pop("use_auth_token", None)
+        revision = kwargs.pop("revision", None)
+
+        self.cached_folder = (
+            pretrained_model_name_or_path
+            if os.path.isdir(pretrained_model_name_or_path)
+            else snapshot_download(
+                pretrained_model_name_or_path,
+                cache_dir=cache_dir,
+                resume_download=resume_download,
+                proxies=proxies,
+                local_files_only=local_files_only,
+                use_auth_token=use_auth_token,
+                revision=revision,
+            )
         )
-
-    if "unetxl" in pipeline.stages:
-        pipeline.models["unetxl"] = UNetXL(
-            pipeline.pipeline_info,
-            pipeline.unet,
-            device=pipeline.torch_device,
-            fp16=True,
-            max_batch_size=pipeline.max_batch_size,
-            unet_dim=4,
-            time_dim=(5 if pipeline_info.is_sd_xl_refiner() else 6),
-        )
-
-    # VAE Decoder
-    if "vae" in pipeline.stages:
-        pipeline.models["vae"] = VAE(
-            pipeline.pipeline_info,
-            pipeline.vae,
-            device=pipeline.torch_device,
-            max_batch_size=pipeline.max_batch_size,
-        )
-        # if pipeline.config.get("vae_torch_fallback", False):
-        #     pipeline.torch_models["vae"] = pipeline.models["vae"].get_model(framework_model_dir)
-
-
-def encode_prompt(pipeline, prompt, negative_prompt):
-    r"""
-    Encodes the prompt into text encoder hidden states.
-
-    Args:
-            prompt (`str` or `List[str]`, *optional*):
-            prompt to be encoded
-        negative_prompt (`str` or `List[str]`, *optional*):
-            The prompt or prompts not to guide the image generation. If not defined, one has to pass
-            `negative_prompt_embeds`. instead. If not defined, one has to pass `negative_prompt_embeds`. instead.
-            Ignored when not using guidance (i.e., ignored if `guidance_scale` is less than `1`).
-    """
-    # Tokenize prompt
-    text_input_ids = (
-        pipeline.tokenizer(
-            prompt,
-            padding="max_length",
-            max_length=pipeline.tokenizer.model_max_length,
-            truncation=True,
-            return_tensors="pt",
-        )
-        .input_ids.type(torch.int32)
-        .to(pipeline.torch_device)
-    )
-
-    # NOTE: output tensor for CLIP must be cloned because it will be overwritten when called again for negative prompt
-    text_embeddings = run_engine(pipeline.engines["clip"], {"input_ids": text_input_ids})["text_embeddings"].clone()
-
-    # Tokenize negative prompt
-    uncond_input_ids = (
-        pipeline.tokenizer(
-            negative_prompt,
-            padding="max_length",
-            max_length=pipeline.tokenizer.model_max_length,
-            truncation=True,
-            return_tensors="pt",
-        )
-        .input_ids.type(torch.int32)
-        .to(pipeline.torch_device)
-    )
-
-    uncond_embeddings = run_engine(pipeline.engines["clip"], {"input_ids": uncond_input_ids})["text_embeddings"]
-
-    # Concatenate the unconditional and text embeddings into a single batch to avoid doing two forward passes for classifier free guidance
-    text_embeddings = torch.cat([uncond_embeddings, text_embeddings]).to(dtype=torch.float16)
-
-    return text_embeddings
-
-
-def denoise_latent(pipeline, latents, text_embeddings, timesteps=None, mask=None, masked_image_latents=None):
-    if not isinstance(timesteps, torch.Tensor):
-        timesteps = pipeline.scheduler.timesteps
-    for _step_index, timestep in enumerate(timesteps):
-        # Expand the latents if we are doing classifier free guidance
-        latent_model_input = torch.cat([latents] * 2)
-        latent_model_input = pipeline.scheduler.scale_model_input(latent_model_input, timestep)
-        if isinstance(mask, torch.Tensor):
-            latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
-
-        # Predict the noise residual
-        timestep_float = timestep.float() if timestep.dtype != torch.float32 else timestep
-
-        noise_pred = run_engine(
-            pipeline.engines["unet"],
-            {"sample": latent_model_input, "timestep": timestep_float, "encoder_hidden_states": text_embeddings},
-        )["latent"]
-
-        # Perform guidance
-        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-        noise_pred = noise_pred_uncond + pipeline.guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-        latents = pipeline.scheduler.step(noise_pred, timestep, latents).prev_sample
-
-    latents = 1.0 / 0.18215 * latents
-    return latents
-
-
-def decode_latent(pipeline, latents):
-    images = run_engine(pipeline.engines["vae"], {"latent": latents})["images"]
-    images = (images / 2 + 0.5).clamp(0, 1)
-    return images.cpu().permute(0, 2, 3, 1).float().numpy()
-
-
-def allocate_buffers(engines, image_height, image_width, batch_size):
-    # Allocate output tensors for I/O bindings
-    for model_name, obj in pipeline.models.items():
-        engines[model_name].allocate_buffers(obj.get_shape_dict(batch_size, image_height, image_width))

@@ -21,10 +21,11 @@
 # --------------------------------------------------------------------------
 
 import time
+
 import torch
 from diffusion_models import PipelineInfo
-from PIL import Image
 from stable_diffusion_pipeline import StableDiffusionPipeline
+
 
 class Txt2ImgPipeline(StableDiffusionPipeline):
     """
@@ -93,15 +94,18 @@ class Txt2ImgPipeline(StableDiffusionPipeline):
 
             return images
 
+
 class TensorrtTxt2ImgPipeline(Txt2ImgPipeline):
     """
     Stable Diffusion Txt2Img XL pipeline using NVidia TensorRT.
     """
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs, engine_name="tensorrt")
 
     def run(self, *args, **kwargs):
-         import tensorrt as trt
-         from trt_demo.utilities import TRT_LOGGER
-         with trt.Runtime(TRT_LOGGER):
-                self.infer(*args, **kwargs)
+        import tensorrt as trt
+        from trt_demo.utilities import TRT_LOGGER
+
+        with trt.Runtime(TRT_LOGGER):
+            self.infer(*args, **kwargs)

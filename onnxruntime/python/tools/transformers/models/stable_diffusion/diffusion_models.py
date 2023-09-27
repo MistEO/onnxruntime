@@ -31,7 +31,7 @@ from typing import List, Optional
 import onnx
 import onnx_graphsurgeon as gs
 import torch
-from diffusers.models import AutoencoderKL, UNet2DConditionModel  # ControlNetModel,
+from diffusers.models import AutoencoderKL, UNet2DConditionModel
 from onnx import GraphProto, shape_inference
 from ort_optimizer import OrtStableDiffusionOptimizer
 from polygraphy.backend.onnx.loader import fold_constants

@@ -749,7 +749,7 @@ def run_tensorrt_demo(
         timing_cache = os.path.join("_original", "timing_cache")
 
         demo = Txt2ImgPipeline(
-            scheduler="DDIM",  # Other choices: "PNDM", "LMSD", "DPM", "EulerA"
+            scheduler="DDIM",
             denoising_steps=steps,
             output_dir=output_dir,
             version=version,
@@ -903,8 +903,8 @@ def run_tensorrt_xl(
     print("[I] Initializing TensorRT accelerated StableDiffusionXL txt2img pipeline")
 
     import tensorrt as trt
-    from trt_demo.utilities import TRT_LOGGER
     from cuda import cudart
+    from trt_demo.utilities import TRT_LOGGER
 
     # Validate image dimensions
     image_height = height

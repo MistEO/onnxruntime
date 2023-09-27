@@ -23,8 +23,9 @@
 import time
 
 import torch
-from diffusion_models import PipelineInfo, get_tokenizer
+from diffusion_models import PipelineInfo
 from stable_diffusion_pipeline import StableDiffusionPipeline
+
 
 class Txt2ImgXLPipeline(StableDiffusionPipeline):
     """
@@ -86,7 +87,7 @@ class Txt2ImgXLPipeline(StableDiffusionPipeline):
         guidance = 5.0
         batch_size = len(prompt)
 
-        with torch.inference_mode(), torch.autocast("cuda"): #, trt.Runtime(TRT_LOGGER):
+        with torch.inference_mode(), torch.autocast("cuda"):
             # Pre-initialize latents
             latents = self.initialize_latents(
                 batch_size=batch_size,
@@ -143,19 +144,21 @@ class Txt2ImgXLPipeline(StableDiffusionPipeline):
                 self.print_summary(self.denoising_steps, e2e_tic, e2e_toc, batch_size)
                 if return_type == "image":
                     self.save_image(images, "txt2img-xl", prompt)
-                    
+
             return images, (e2e_toc - e2e_tic) * 1000.0
-        
+
 
 class TensorrtTxt2ImgXLPipeline(Txt2ImgXLPipeline):
     """
     Stable Diffusion Txt2Img XL pipeline using NVidia TensorRT.
     """
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs, engine_name="tensorrt")
 
     def run(self, *args, **kwargs):
-         import tensorrt as trt
-         from trt_demo.utilities import TRT_LOGGER
-         with trt.Runtime(TRT_LOGGER):
-                self.infer(*args, **kwargs)
+        import tensorrt as trt
+        from trt_demo.utilities import TRT_LOGGER
+
+        with trt.Runtime(TRT_LOGGER):
+            self.infer(*args, **kwargs)
