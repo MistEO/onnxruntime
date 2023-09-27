@@ -1,3 +1,8 @@
+# -------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation.  All rights reserved.
+# Licensed under the MIT License.
+# --------------------------------------------------------------------------
+# Modified from TensorRT demo diffusion, which has the following license:
 #
 # SPDX-FileCopyrightText: Copyright (c) 1993-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
@@ -13,25 +18,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
-# -------------------------------------------------------------------------
-# Modifications: use pipeline info and refactoring models.
-#
-# Copyright (c) Microsoft Corporation.  All rights reserved.
-# Licensed under the MIT License.
 # --------------------------------------------------------------------------
 
 import time
-
-import tensorrt as trt
 import torch
 from diffusion_models import PipelineInfo
 from PIL import Image
-from tensorrt_stable_diffusion_pipeline import TensorrtStableDiffusionPipeline
-from trt_demo.utilities import TRT_LOGGER
+from stable_diffusion_pipeline import StableDiffusionPipeline
 
-
-class TensorrtTxt2ImgPipeline(TensorrtStableDiffusionPipeline):
+class Txt2ImgPipeline(StableDiffusionPipeline):
     """
     Stable Diffusion Txt2Img pipeline using NVidia TensorRT.
     """
@@ -68,7 +63,7 @@ class TensorrtTxt2ImgPipeline(TensorrtStableDiffusionPipeline):
         """
         assert len(prompt) == len(negative_prompt)
         batch_size = len(prompt)
-        with torch.inference_mode(), torch.autocast("cuda"), trt.Runtime(TRT_LOGGER):
+        with torch.inference_mode(), torch.autocast("cuda"):
             # Pre-initialize latents
             latents = self.initialize_latents(
                 batch_size=batch_size,
@@ -97,3 +92,16 @@ class TensorrtTxt2ImgPipeline(TensorrtStableDiffusionPipeline):
                 self.save_image(images, "txt2img", prompt)
 
             return images
+
+class TensorrtTxt2ImgPipeline(Txt2ImgPipeline):
+    """
+    Stable Diffusion Txt2Img XL pipeline using NVidia TensorRT.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs, engine_name="tensorrt")
+
+    def run(self, *args, **kwargs):
+         import tensorrt as trt
+         from trt_demo.utilities import TRT_LOGGER
+         with trt.Runtime(TRT_LOGGER):
+                self.infer(*args, **kwargs)

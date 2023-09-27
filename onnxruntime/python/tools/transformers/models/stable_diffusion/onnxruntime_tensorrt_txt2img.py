@@ -33,9 +33,9 @@ pip install onnxruntime-gpu
 """
 
 import gc
+import logging
 import os
 import shutil
-import logging
 from typing import List, Optional, Union
 
 import torch
@@ -50,11 +50,13 @@ from diffusers.schedulers import DDIMScheduler
 from diffusers.utils import DIFFUSERS_CACHE
 from diffusion_models import CLIP, VAE, CLIPWithProj, PipelineInfo, UNet, UNetXL
 from huggingface_hub import snapshot_download
+from ort_utils import OrtTensorrtEngine, build_engines, denoise_latent, encode_prompt, load_models, run_engine
 from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
-from ort_utils import OrtTensorrtEngine, build_engines, run_engine, load_models, encode_prompt, denoise_latent
+
 import onnxruntime as ort
 
 logger = logging.getLogger(__name__)
+
 
 class OnnxruntimeTensorRTStableDiffusionPipeline(StableDiffusionPipeline):
     r"""
@@ -181,7 +183,7 @@ class OnnxruntimeTensorRTStableDiffusionPipeline(StableDiffusionPipeline):
 
     def __denoise_latent(self, latents, text_embeddings, timesteps=None, mask=None, masked_image_latents=None):
         return denoise_latent(self, latents, text_embeddings, timesteps, mask, masked_image_latents)
-    
+
     def __decode_latent(self, latents):
         images = run_engine(self.engines["vae"], {"latent": latents})["images"]
         images = (images / 2 + 0.5).clamp(0, 1)

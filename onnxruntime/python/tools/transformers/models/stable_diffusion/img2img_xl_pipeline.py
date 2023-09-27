@@ -23,14 +23,12 @@
 
 import time
 
-import tensorrt as trt
 import torch
 from diffusion_models import PipelineInfo, get_tokenizer
-from tensorrt_stable_diffusion_pipeline import TensorrtStableDiffusionPipeline
-from trt_demo.utilities import TRT_LOGGER
+from stable_diffusion_pipeline import StableDiffusionPipeline
 
 
-class TensorrtImg2ImgXLPipeline(TensorrtStableDiffusionPipeline):
+class Img2ImgXLPipeline(StableDiffusionPipeline):
     """
     Stable Diffusion Img2Img XL pipeline using NVidia TensorRT.
     """
@@ -104,7 +102,7 @@ class TensorrtImg2ImgXLPipeline(TensorrtStableDiffusionPipeline):
         aesthetic_score = 6.0
         negative_aesthetic_score = 2.5
 
-        with torch.inference_mode(), torch.autocast("cuda"), trt.Runtime(TRT_LOGGER):
+        with torch.inference_mode(), torch.autocast("cuda"):
             batch_size = len(prompt)
 
             torch.cuda.synchronize()
@@ -179,3 +177,16 @@ class TensorrtImg2ImgXLPipeline(TensorrtStableDiffusionPipeline):
                 self.save_image(images, "txt2img-xl", prompt)
 
         return images, (e2e_toc - e2e_tic) * 1000.0
+
+class TensorrtImg2ImgXLPipeline(Img2ImgXLPipeline):
+    """
+    Stable Diffusion Img2Img XL pipeline using NVidia TensorRT.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs, engine_name="tensorrt")
+
+    def run(self, *args, **kwargs):
+         import tensorrt as trt
+         from trt_demo.utilities import TRT_LOGGER
+         with trt.Runtime(TRT_LOGGER):
+                self.infer(*args, **kwargs)

@@ -1,3 +1,8 @@
+# -------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation.  All rights reserved.
+# Licensed under the MIT License.
+# --------------------------------------------------------------------------
+# Modified from TensorRT demo diffusion, which has the following license:
 #
 # SPDX-FileCopyrightText: Copyright (c) 1993-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
@@ -13,12 +18,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
-# -------------------------------------------------------------------------
-# Modified from TensorRT demo diffusion: add pipeline info, refactoring models, use onnxruntime
-#
-# Copyright (c) Microsoft Corporation.  All rights reserved.
-# Licensed under the MIT License.
 # --------------------------------------------------------------------------
 
 import gc
@@ -66,7 +65,7 @@ class TensorrtEngineHelper:
         self.hf_token = hf_token
         self.device = device
         self.use_cuda_graph = use_cuda_graph
-        
+
         self.torch_device = torch.device(device, torch.cuda.current_device())
         self.stages = pipeline_info.stages()
         self.vae_torch_fallback = self.pipeline_info.is_sd_xl()
@@ -303,7 +302,7 @@ class TensorrtEngineHelper:
                 onnx_refit_path = self.get_onnx_path(model_name, onnx_refit_dir)
                 if os.path.exists(onnx_refit_path):
                     self.engine[model_name].refit(onnx_opt_path, onnx_refit_path)
-        
+
     def max_device_memory(self):
         max_device_memory = 0
         for _model_name, engine in self.engine.items():
@@ -322,7 +321,7 @@ class TensorrtEngineHelper:
     def run_engine(self, model_name, feed_dict):
         engine = self.engine[model_name]
         return engine.infer(feed_dict, self.stream, use_cuda_graph=self.use_cuda_graph)
-        
+
     def vae_decode(self, latents):
         if self.vae_torch_fallback:
             latents = latents.to(dtype=torch.float32)
@@ -330,5 +329,5 @@ class TensorrtEngineHelper:
             images = self.torch_models["vae"](latents)["sample"]
         else:
             images = self.run_engine("vae", {"latent": latents})["images"]
-            
+
         return images

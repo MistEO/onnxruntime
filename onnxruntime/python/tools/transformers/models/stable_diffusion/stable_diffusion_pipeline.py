@@ -1,3 +1,8 @@
+# -------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation.  All rights reserved.
+# Licensed under the MIT License.
+# --------------------------------------------------------------------------
+# Modified from TensorRT demo diffusion, which has the following license:
 #
 # SPDX-FileCopyrightText: Copyright (c) 1993-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
@@ -13,12 +18,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
-# -------------------------------------------------------------------------
-# Modified from TensorRT demo diffusion: add pipeline info, refactoring models, use onnxruntime
-#
-# Copyright (c) Microsoft Corporation.  All rights reserved.
-# Licensed under the MIT License.
 # --------------------------------------------------------------------------
 
 import gc
@@ -30,6 +29,7 @@ import nvtx
 import torch
 from cuda import cudart
 from diffusion_models import CLIP, VAE, CLIPWithProj, PipelineInfo, UNet, UNetXL, get_tokenizer
+from tensorrt_engine_helper import TensorrtEngineHelper
 from trt_demo.utilities import (
     DDIMScheduler,
     Engine,
@@ -37,10 +37,9 @@ from trt_demo.utilities import (
     UniPCMultistepScheduler,
     save_image,
 )
-from tensorrt_engine_helper import TensorrtEngineHelper
 
 
-class TensorrtStableDiffusionPipeline:
+class StableDiffusionPipeline:
     """
     Stable Diffusion pipeline using TensorRT.
     """
@@ -59,7 +58,7 @@ class TensorrtStableDiffusionPipeline:
         nvtx_profile=False,
         use_cuda_graph=False,
         framework_model_dir="pytorch_model",
-        engine_name = 'tensorrt',
+        engine_name="tensorrt",
     ):
         """
         Initializes the Diffusion pipeline.
@@ -144,16 +143,17 @@ class TensorrtStableDiffusionPipeline:
 
         self.tokenizer = None
         self.tokenizer2 = None
-        
+
         # use in child class
         self.refiner = pipeline_info.is_sd_xl_refiner()
-        
+
         # backend engine
+        self.engine_name = engine_name
         if engine_name in ["tensorrt", "tensorrt_demo"]:
             self.engine_helper = TensorrtEngineHelper(pipeline_info, max_batch_size, hf_token, device, use_cuda_graph)
         else:
             self.engine_helper = None
-            
+
     def loadResources(self, image_height, image_width, batch_size, seed):
         # Initialize noise generator
         self.generator = torch.Generator(device="cuda").manual_seed(seed) if seed else None
@@ -167,7 +167,7 @@ class TensorrtStableDiffusionPipeline:
         if self.pipeline_info.is_sd_xl():
             self.tokenizer2 = get_tokenizer(
                 self.pipeline_info, self.framework_model_dir, self.hf_token, subfolder="tokenizer_2"
-        )
+            )
 
         # Pre-compute latent input scales and linear multistep coefficients
         self.scheduler.set_timesteps(self.denoising_steps)
@@ -178,18 +178,18 @@ class TensorrtStableDiffusionPipeline:
         for stage in ["clip", "denoise", "vae", "vae_encoder"]:
             for marker in ["start", "stop"]:
                 self.events[stage + "-" + marker] = cudart.cudaEventCreate()[1]
-        
+
         self.engine_helper.load_resources(image_height, image_width, batch_size)
 
-    def teardown(self):        
+    def teardown(self):
         for e in self.events.values():
             cudart.cudaEventDestroy(e)
-            
+
         if self.engine_helper:
             self.engine_helper.teardown()
 
     def runEngine(self, model_name, feed_dict):
-        self.engine_helper.run_engine(model_name, feed_dict)
+        return self.engine_helper.run_engine(model_name, feed_dict)
 
     def initialize_latents(self, batch_size, unet_channels, latent_height, latent_width):
         latents_dtype = torch.float32  # text_embeddings.dtype
@@ -269,7 +269,6 @@ class TensorrtStableDiffusionPipeline:
 
         # NOTE: output tensor for CLIP must be cloned because it will be overwritten when called again for negative prompt
         outputs = self.runEngine(encoder, {"input_ids": text_input_ids})
-        print(encoder, "input_ids", text_input_ids, "output", outputs)
         text_embeddings = outputs["text_embeddings"].clone()
         if output_hidden_states:
             hidden_states = outputs["hidden_states"].clone()

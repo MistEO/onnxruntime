@@ -11,7 +11,6 @@ from typing import List, Optional, Union
 
 import torch
 from cuda import cudart
-
 from diffusers.models import AutoencoderKL, UNet2DConditionModel
 from diffusers.pipelines.stable_diffusion import (
     StableDiffusionPipeline,
@@ -29,9 +28,10 @@ from onnxruntime.transformers.io_binding_helper import CudaSession
 
 logger = logging.getLogger(__name__)
 
-#-----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
 # Utilities for CUDA EP
-#-----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
 
 class Engine(CudaSession):
     def __init__(self, engine_path, provider: str, device_id: int = 0, enable_cuda_graph=False):
@@ -140,9 +140,11 @@ class Engines:
     def get_engine(self, model_name):
         return self.engines[model_name]
 
-#-----------------------------------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------------------------------
 # Utilities for TensorRT EP
-#-----------------------------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------------------------
+
 
 class OrtTensorrtEngine(CudaSession):
     def __init__(self, engine_path, device_id, onnx_path, fp16, input_profile, workspace_size, enable_cuda_graph):
@@ -225,6 +227,7 @@ def has_engine_file(engine_path):
             if entry.is_file() and entry.name.endswith(".engine"):
                 return True
     return False
+
 
 def get_work_space_size(model_name, max_workspace_size):
     gibibyte = 2**30
@@ -350,6 +353,7 @@ def build_engines(
 def run_engine(engine, feed_dict):
     return engine.infer(feed_dict)
 
+
 def load_models(pipeline):
     pipeline.embedding_dim = pipeline.text_encoder.config.hidden_size
 
@@ -403,7 +407,8 @@ def load_models(pipeline):
         )
         # if pipeline.config.get("vae_torch_fallback", False):
         #     pipeline.torch_models["vae"] = pipeline.models["vae"].get_model(framework_model_dir)
-            
+
+
 def encode_prompt(pipeline, prompt, negative_prompt):
     r"""
     Encodes the prompt into text encoder hidden states.
@@ -480,15 +485,14 @@ def denoise_latent(pipeline, latents, text_embeddings, timesteps=None, mask=None
     latents = 1.0 / 0.18215 * latents
     return latents
 
+
 def decode_latent(pipeline, latents):
     images = run_engine(pipeline.engines["vae"], {"latent": latents})["images"]
     images = (images / 2 + 0.5).clamp(0, 1)
     return images.cpu().permute(0, 2, 3, 1).float().numpy()
 
+
 def allocate_buffers(engines, image_height, image_width, batch_size):
     # Allocate output tensors for I/O bindings
     for model_name, obj in pipeline.models.items():
         engines[model_name].allocate_buffers(obj.get_shape_dict(batch_size, image_height, image_width))
-
-
-

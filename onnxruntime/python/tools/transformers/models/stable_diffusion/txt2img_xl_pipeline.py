@@ -1,3 +1,8 @@
+# -------------------------------------------------------------------------
+# Copyright (c) Microsoft Corporation.  All rights reserved.
+# Licensed under the MIT License.
+# --------------------------------------------------------------------------
+# Modified from TensorRT demo diffusion, which has the following license:
 #
 # SPDX-FileCopyrightText: Copyright (c) 1993-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
@@ -13,26 +18,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
-# -------------------------------------------------------------------------
-# Modifications: use pipeline info and refactoring models.
-#
-# Copyright (c) Microsoft Corporation.  All rights reserved.
-# Licensed under the MIT License.
 # --------------------------------------------------------------------------
 
 import time
 
-import tensorrt as trt
 import torch
 from diffusion_models import PipelineInfo, get_tokenizer
-from tensorrt_stable_diffusion_pipeline import TensorrtStableDiffusionPipeline
-from trt_demo.utilities import TRT_LOGGER
+from stable_diffusion_pipeline import StableDiffusionPipeline
 
-
-class TensorrtTxt2ImgXLPipeline(TensorrtStableDiffusionPipeline):
+class Txt2ImgXLPipeline(StableDiffusionPipeline):
     """
-    Stable Diffusion Txt2Img XL pipeline using NVidia TensorRT.
+    Stable Diffusion Txt2Img XL pipeline.
     """
 
     def __init__(self, pipeline_info: PipelineInfo, **kwargs):
@@ -90,7 +86,7 @@ class TensorrtTxt2ImgXLPipeline(TensorrtStableDiffusionPipeline):
         guidance = 5.0
         batch_size = len(prompt)
 
-        with torch.inference_mode(), torch.autocast("cuda"), trt.Runtime(TRT_LOGGER):
+        with torch.inference_mode(), torch.autocast("cuda"): #, trt.Runtime(TRT_LOGGER):
             # Pre-initialize latents
             latents = self.initialize_latents(
                 batch_size=batch_size,
@@ -133,8 +129,6 @@ class TensorrtTxt2ImgXLPipeline(TensorrtStableDiffusionPipeline):
                 latents, text_embeddings, denoiser="unetxl", guidance=guidance, add_kwargs=add_kwargs
             )
 
-        # FIXME - SDXL/VAE torch fallback
-        with torch.inference_mode():
             # VAE decode latent
             if return_type == "latents":
                 images = latents * self.vae_scaling_factor
@@ -149,5 +143,19 @@ class TensorrtTxt2ImgXLPipeline(TensorrtStableDiffusionPipeline):
                 self.print_summary(self.denoising_steps, e2e_tic, e2e_toc, batch_size)
                 if return_type == "image":
                     self.save_image(images, "txt2img-xl", prompt)
+                    
+            return images, (e2e_toc - e2e_tic) * 1000.0
+        
 
-        return images, (e2e_toc - e2e_tic) * 1000.0
+class TensorrtTxt2ImgXLPipeline(Txt2ImgXLPipeline):
+    """
+    Stable Diffusion Txt2Img XL pipeline using NVidia TensorRT.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs, engine_name="tensorrt")
+
+    def run(self, *args, **kwargs):
+         import tensorrt as trt
+         from trt_demo.utilities import TRT_LOGGER
+         with trt.Runtime(TRT_LOGGER):
+                self.infer(*args, **kwargs)
