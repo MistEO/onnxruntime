@@ -56,13 +56,13 @@ namespace GenerationCudaDeviceHelper {
 // It might be better to forcefully require the same type since cast node generates
 // extra overhead.
 Status ReorderPastState(
-    const void* cuda_device_prop,
+    const void*, // cuda_device_prop,
     Tensor& past_state,
     Tensor& past_state_staging,
     Stream* stream) {
   ORT_ENFORCE(stream);
   cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream->GetHandle());
-  cublasHandle_t cublas_handle = static_cast<CudaStream*>(stream)->cublas_handle_;
+  //cublasHandle_t cublas_handle = static_cast<CudaStream*>(stream)->cublas_handle_;
 
   const auto& past_state_shape = past_state.Shape();
 
@@ -70,8 +70,7 @@ Status ReorderPastState(
   const bool packed_past = past_state_dims.size() == 5;
 
   // Copy the 'K' values into the temp staging buffer
-  size_t past_state_size = packed_past ? past_state.SizeInBytes() / 2 : past_state.SizeInBytes();
-  void* past_state_staging_buffer = past_state_staging.MutableDataRaw();
+  //size_t past_state_size = packed_past ? past_state.SizeInBytes() / 2 : past_state.SizeInBytes();
 
   // Now consider the original 'K' values to be of shape [B, N, max_length, head_size / x, x] and transpose it into
   // [B, N, head_size / x, max_length, x], where x = 16 / sizeof(T)
@@ -81,7 +80,6 @@ Status ReorderPastState(
   size_t num_heads = packed_past ? past_state_dims[2] : past_state_dims[1];
   size_t max_length = packed_past ? past_state_dims[3] : past_state_dims[2];
   size_t head_size = packed_past ? past_state_dims[4] : past_state_dims[3];
-  size_t total_past_num = past_state_vector.size();
 
   void* past_state_staging_buffer = past_state_staging.MutableDataRaw();
   void* past_state_buffer = past_state.MutableDataRaw();
@@ -96,6 +94,8 @@ Status ReorderPastState(
                                         static_cast<int>(chunk_size),
                                         static_cast<int>(1),
                                         cuda_stream);
+
+  return Status::OK();
 }
 
 Status InitCacheIndir(Tensor& cache_indir, Stream* stream) {
